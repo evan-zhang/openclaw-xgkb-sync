@@ -37,6 +37,7 @@
       <button type="button" class="tab" data-tab="global">全局配置</button>
       <button type="button" class="tab" data-tab="status">运行状态</button>
       <button type="button" class="tab" data-tab="logs">同步日志</button>
+      <button type="button" class="tab" data-tab="upgrade">升级部署</button>
     </nav>
 
     <!-- 同步映射 -->
@@ -172,6 +173,19 @@
       </div>
       <div class="log-meta" id="logMeta">加载中…</div>
       <pre class="log-viewer" id="logViewer">加载中…</pre>
+    </section>
+
+    <!-- 升级部署 -->
+    <section class="panel" id="panel-upgrade">
+      <div class="panel-head">
+        <h2>升级部署</h2>
+        <div class="log-actions">
+          <button type="button" class="btn btn-secondary" id="btnCheckUpgrade">检查更新</button>
+          <button type="button" class="btn btn-primary" id="btnRunUpgrade">在线升级</button>
+        </div>
+      </div>
+      <div class="upgrade-summary" id="upgradeSummary">正在检查版本状态…</div>
+      <pre class="log-viewer upgrade-output" id="upgradeOutput">暂无升级日志</pre>
     </section>
   </div>
 

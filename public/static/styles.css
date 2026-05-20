@@ -594,6 +594,58 @@ body {
   color: #fcd34d;
 }
 
+.upgrade-summary {
+  margin-bottom: 12px;
+}
+
+.upgrade-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.upgrade-grid div {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.upgrade-grid span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-bottom: 4px;
+}
+
+.upgrade-grid strong {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.upgrade-warning {
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  color: #fca5a5;
+  padding: 10px;
+  font-size: 0.8125rem;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+
+.upgrade-note {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.upgrade-output {
+  min-height: 260px;
+}
+
 .modal {
   border: 1px solid var(--border);
   border-radius: var(--radius);

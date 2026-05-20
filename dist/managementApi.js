@@ -37,6 +37,7 @@ exports.ManagementApi = void 0;
 const http = __importStar(require("http"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const child_process_1 = require("child_process");
 const scheduler_1 = require("./scheduler");
 const config_1 = require("./config");
 const managementApiCredentials_1 = require("./managementApiCredentials");
@@ -56,6 +57,8 @@ const VERSION = readVersion();
 const LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
 /** 静态管理页面目录（与 dist/ 或 src/ 同级的 public/） */
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
+const REPO_ROOT = path.resolve(__dirname, '..');
+const NODE_BIN_DIR = path.dirname(process.execPath);
 /** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
 function maskSecret(value) {
     const secret = value?.trim();
@@ -125,6 +128,9 @@ class ManagementApi {
             console.log(`  GET    /health`);
             console.log(`  GET    /status`);
             console.log(`  GET    /logs`);
+            console.log(`  GET    /upgrade/status`);
+            console.log(`  POST   /upgrade/check`);
+            console.log(`  POST   /upgrade/run`);
             console.log(`  GET    /mappings`);
             console.log(`  POST   /mappings          新增 mapping`);
             console.log(`  PUT    /mappings/:id       upsert mapping（存在则更新，不存在则创建）`);
@@ -173,6 +179,24 @@ class ManagementApi {
         if (method === 'GET' && urlPath === '/logs') {
             return this.handleLogs(res, parsedUrl.searchParams);
         }
+        if (urlPath.startsWith('/upgrade/') && !this.isLocalRequest(req)) {
+            return this.sendJson(res, 403, {
+                ok: false,
+                error: '升级部署只允许从本机访问',
+            });
+        }
+        // GET /upgrade/status
+        if (method === 'GET' && urlPath === '/upgrade/status') {
+            return this.handleUpgradeStatus(res, false);
+        }
+        // POST /upgrade/check
+        if (method === 'POST' && urlPath === '/upgrade/check') {
+            return this.handleUpgradeStatus(res, true);
+        }
+        // POST /upgrade/run
+        if (method === 'POST' && urlPath === '/upgrade/run') {
+            return this.handleUpgradeRun(res);
+        }
         // POST /reload
         if (method === 'POST' && urlPath === '/reload') {
             return this.handleReload(res);
@@ -213,6 +237,10 @@ class ManagementApi {
             return this.handleDeleteMapping(res, decodeURIComponent(deleteMatch[1]));
         }
         this.sendJson(res, 404, { ok: false, error: `未知路由: ${method} ${urlPath}` });
+    }
+    isLocalRequest(req) {
+        const addr = req.socket.remoteAddress;
+        return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
     }
     // ==================== 路由处理 ====================
     handleHealth(res) {
@@ -330,6 +358,153 @@ class ManagementApi {
         }
         finally {
             fs.closeSync(fd);
+        }
+    }
+    handleUpgradeStatus(res, fetchRemote) {
+        try {
+            if (fetchRemote) {
+                this.runGit(['fetch', '--prune']);
+            }
+            this.sendJson(res, 200, this.getUpgradeStatus());
+        }
+        catch (e) {
+            this.sendJson(res, 500, {
+                ok: false,
+                error: e instanceof Error ? e.message : String(e),
+            });
+        }
+    }
+    handleUpgradeRun(res) {
+        const startedAt = Date.now();
+        try {
+            this.runGit(['fetch', '--prune']);
+            const before = this.getUpgradeStatus();
+            if (before.dirty) {
+                return this.sendJson(res, 400, {
+                    ok: false,
+                    error: '当前工作区有未提交改动，已拒绝在线升级，避免覆盖本地修改。',
+                    dirtyFiles: before.dirtyFiles,
+                });
+            }
+            if (!before.upstream) {
+                return this.sendJson(res, 400, {
+                    ok: false,
+                    error: '当前分支没有配置 upstream，无法确定在线升级来源。',
+                });
+            }
+            if (before.ahead > 0) {
+                return this.sendJson(res, 400, {
+                    ok: false,
+                    error: '当前分支领先远端，已拒绝在线升级。请先推送或切换到可快进更新的部署分支。',
+                    ahead: before.ahead,
+                });
+            }
+            if (before.behind === 0) {
+                return this.sendJson(res, 200, {
+                    ok: true,
+                    message: '当前已经是最新版本，无需升级。',
+                    status: before,
+                    restarted: false,
+                });
+            }
+            const pullOutput = this.runGit(['pull', '--ff-only']);
+            const installOutput = this.runNpm(['install'], 120_000);
+            const buildOutput = this.runNpm(['run', 'build'], 120_000);
+            const after = this.getUpgradeStatus();
+            console.log(`[ManagementApi] 在线升级完成 ${before.head.slice(0, 7)} -> ${after.head.slice(0, 7)}，准备重启服务`);
+            this.sendJson(res, 200, {
+                ok: true,
+                message: '升级部署完成，服务正在重启。',
+                restarted: true,
+                durationMs: Date.now() - startedAt,
+                before,
+                after,
+                output: [...pullOutput, ...installOutput, ...buildOutput].slice(-80),
+            });
+            setTimeout(() => process.exit(0), 800);
+        }
+        catch (e) {
+            this.sendJson(res, 500, {
+                ok: false,
+                error: e instanceof Error ? e.message : String(e),
+                durationMs: Date.now() - startedAt,
+            });
+        }
+    }
+    getUpgradeStatus() {
+        const branch = this.runGitText(['branch', '--show-current']) || 'detached';
+        const upstream = this.tryGitText(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+        const head = this.runGitText(['rev-parse', 'HEAD']);
+        const upstreamHead = upstream ? this.tryGitText(['rev-parse', '@{u}']) : null;
+        const dirtyFiles = this.runGitText(['status', '--porcelain'])
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean);
+        let ahead = 0;
+        let behind = 0;
+        if (upstream) {
+            const counts = this.runGitText(['rev-list', '--left-right', '--count', 'HEAD...@{u}'])
+                .split(/\s+/)
+                .map((x) => Number(x));
+            ahead = counts[0] || 0;
+            behind = counts[1] || 0;
+        }
+        const remoteName = upstream?.split('/')[0];
+        const remoteUrl = remoteName ? this.tryGitText(['remote', 'get-url', remoteName]) : null;
+        return {
+            ok: true,
+            repoRoot: REPO_ROOT,
+            branch,
+            upstream,
+            head,
+            upstreamHead,
+            ahead,
+            behind,
+            dirty: dirtyFiles.length > 0,
+            dirtyFiles,
+            remoteUrl,
+            checkedAt: new Date().toISOString(),
+        };
+    }
+    runGit(args, timeoutMs = 60_000) {
+        return this.runCommand('git', args, timeoutMs);
+    }
+    runGitText(args, timeoutMs = 60_000) {
+        return this.runGit(args, timeoutMs).join('\n').trim();
+    }
+    runNpm(args, timeoutMs) {
+        const localNpm = path.join(NODE_BIN_DIR, process.platform === 'win32' ? 'npm.cmd' : 'npm');
+        if (fs.existsSync(localNpm)) {
+            return this.runCommand(localNpm, args, timeoutMs);
+        }
+        return this.runCommand('npm', args, timeoutMs);
+    }
+    tryGitText(args) {
+        try {
+            const out = this.runGitText(args);
+            return out || null;
+        }
+        catch {
+            return null;
+        }
+    }
+    runCommand(command, args, timeoutMs) {
+        console.log(`[ManagementApi] 执行命令: ${command} ${args.join(' ')}`);
+        try {
+            const out = (0, child_process_1.execFileSync)(command, args, {
+                cwd: REPO_ROOT,
+                encoding: 'utf-8',
+                timeout: timeoutMs,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            return out.split(/\r?\n/).filter(Boolean);
+        }
+        catch (e) {
+            const err = e;
+            const stdout = err.stdout ? String(err.stdout) : '';
+            const stderr = err.stderr ? String(err.stderr) : '';
+            const details = [stdout, stderr].filter(Boolean).join('\n').trim();
+            throw new Error(`命令失败: ${command} ${args.join(' ')}` + (details ? `\n${details}` : ''));
         }
     }
     handleReload(res) {

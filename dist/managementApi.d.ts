@@ -32,9 +32,18 @@ export declare class ManagementApi {
     start(): void;
     stop(): void;
     private handle;
+    private isLocalRequest;
     private handleHealth;
     private handleStatus;
     private handleLogs;
+    private handleUpgradeStatus;
+    private handleUpgradeRun;
+    private getUpgradeStatus;
+    private runGit;
+    private runGitText;
+    private runNpm;
+    private tryGitText;
+    private runCommand;
     private handleReload;
     private handleSyncAll;
     private handleSyncOne;

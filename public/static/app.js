@@ -9,6 +9,7 @@
   let mappingsCache = [];
   let statusCache = null;
   let logsLoaded = false;
+  let upgradeLoaded = false;
 
   // ==================== API ====================
 
@@ -165,6 +166,7 @@
       tab.classList.add('active');
       $(`#panel-${tab.dataset.tab}`).classList.add('active');
       if (tab.dataset.tab === 'logs') loadLogs().catch((e) => toast(e.message, 'error'));
+      if (tab.dataset.tab === 'upgrade') loadUpgradeStatus(false).catch((e) => toast(e.message, 'error'));
     });
   });
 
@@ -624,10 +626,69 @@
   $('#logLevelFilter')?.addEventListener('change', () => loadLogs().catch((e) => toast(e.message, 'error')));
   $('#logLineCount')?.addEventListener('change', () => loadLogs().catch((e) => toast(e.message, 'error')));
 
+  // ==================== Upgrade ====================
+
+  function renderUpgradeStatus(data) {
+    const summary = $('#upgradeSummary');
+    const dirty = data.dirty ? `<span class="badge badge-error">工作区有改动</span>` : '<span class="badge badge-on">工作区干净</span>';
+    const update = data.behind > 0
+      ? `<span class="badge badge-sync">可更新 ${data.behind} 个提交</span>`
+      : '<span class="badge badge-on">已是最新</span>';
+    const ahead = data.ahead > 0 ? `<span class="badge badge-error">领先 ${data.ahead} 个提交</span>` : '';
+    summary.innerHTML = `<div class="upgrade-grid">
+      <div><span>当前分支</span><strong>${escapeHtml(data.branch || '—')}</strong></div>
+      <div><span>上游分支</span><strong>${escapeHtml(data.upstream || '未配置')}</strong></div>
+      <div><span>当前版本</span><strong>${escapeHtml((data.head || '').slice(0, 12) || '—')}</strong></div>
+      <div><span>远端版本</span><strong>${escapeHtml((data.upstreamHead || '').slice(0, 12) || '—')}</strong></div>
+      <div><span>状态</span><strong>${dirty} ${update} ${ahead}</strong></div>
+      <div><span>检查时间</span><strong>${escapeHtml(new Date(data.checkedAt).toLocaleString())}</strong></div>
+    </div>
+    ${data.dirtyFiles?.length ? `<div class="upgrade-warning">未提交改动：${escapeHtml(data.dirtyFiles.slice(0, 8).join('；'))}</div>` : ''}
+    <div class="upgrade-note">在线升级会执行快进更新、安装依赖、重新构建，并在成功后重启服务。仅本机请求可以触发升级。</div>`;
+  }
+
+  async function loadUpgradeStatus(fetchRemote) {
+    const output = $('#upgradeOutput');
+    output.textContent = fetchRemote ? '正在从远端检查更新…' : '正在读取本地版本状态…';
+    const data = await api(fetchRemote ? 'POST' : 'GET', fetchRemote ? '/upgrade/check' : '/upgrade/status');
+    upgradeLoaded = true;
+    renderUpgradeStatus(data);
+    output.textContent = JSON.stringify(data, null, 2);
+    return data;
+  }
+
+  $('#btnCheckUpgrade')?.addEventListener('click', () => {
+    loadUpgradeStatus(true)
+      .then(() => toast('更新检查完成', 'success'))
+      .catch((e) => toast(e.message, 'error'));
+  });
+
+  $('#btnRunUpgrade')?.addEventListener('click', async () => {
+    if (!confirm('在线升级会执行 git pull、npm install、npm run build，并在成功后重启服务。确定继续？')) return;
+    const output = $('#upgradeOutput');
+    try {
+      output.textContent = '正在升级部署，请不要关闭页面…';
+      const data = await api('POST', '/upgrade/run');
+      output.textContent = JSON.stringify(data, null, 2);
+      toast(data.message || '升级完成', 'success');
+      if (data.restarted) {
+        setTimeout(() => {
+          refreshAll().catch(() => {});
+        }, 4000);
+      }
+    } catch (e) {
+      output.textContent = e.data ? JSON.stringify(e.data, null, 2) : e.message;
+      toast(e.message, 'error');
+    }
+  });
+
   async function refreshAll() {
     await Promise.all([loadHealth(), loadMappings(), loadGlobalConfig(), refreshStatus()]);
     if (logsLoaded || $('#panel-logs')?.classList.contains('active')) {
       await loadLogs();
+    }
+    if (upgradeLoaded || $('#panel-upgrade')?.classList.contains('active')) {
+      await loadUpgradeStatus(false);
     }
   }
 
