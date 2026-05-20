@@ -362,7 +362,7 @@ export class SyncEngine {
       return null;
     }
 
-    // 过滤掉不匹配 filePatterns 的新增文件（如 .sql、.log 等）
+    // 过滤掉不匹配 filePatterns 的新增文件（如二进制或用户自定义排除的类型）
     const filteredNewFiles = resolvedNewFiles.filter((f) => this.matchesSync(f.path));
     const skippedCount = resolvedNewFiles.length - filteredNewFiles.length;
     if (skippedCount > 0) {

@@ -20,11 +20,10 @@
 
   "mappings": [
     {
-      "_comment": "极简配置：仅填 projectId，同步该空间根目录下所有 .md 文件",
+      "_comment": "极简配置：仅填 projectId，默认同步该空间根目录下常见文本文件（md/json/txt/html/css/js/ts/yaml/sql 等）",
       "mappingId": "map-personal-root",
       "enabled": false,
-      "localRoot": "/data/openclaw/personal",
-      "filePatterns": ["**/*.md"]
+      "localRoot": "/data/openclaw/personal"
     },
     {
       "_comment": "子目录配置：只填路径，projectId 自动使用个人空间，remoteRootFileId 自动解析并缓存",
@@ -32,7 +31,6 @@
       "enabled": true,
       "localRoot": "/data/openclaw/tasks/output-a",
       "remoteRootFolderPath": "OpenClaw/OutputA",
-      "filePatterns": ["**/*.md"],
       "excludePatterns": ["**/_conflict_*", "**/.tmp/**"]
     },
     {
@@ -43,7 +41,6 @@
       "projectId": "12345",
       "remoteRootFileId": "11111",
       "remoteRootFolderPath": "OpenClaw/Research",
-      "filePatterns": ["**/*.md"],
       "excludePatterns": ["**/_conflict_*", "**/.tmp/**", "**/draft/**"]
     },
     {
@@ -52,8 +49,7 @@
       "enabled": false,
       "localRoot": "/data/openclaw/team",
       "projectId": "99999",
-      "remoteRootFolderPath": "AI研发/同步区",
-      "filePatterns": ["**/*.md"]
+      "remoteRootFolderPath": "AI研发/同步区"
     },
     {
       "_comment": "多身份场景：该 mapping 使用独立 appKey，覆盖全局身份（如用于不同业务空间授权）",
@@ -63,8 +59,7 @@
       "appKey": "biz-specific-app-key",
       "projectId": "88888",
       "remoteRootFolderPath": "业务A/输出",
-      "syncDirection": "push",
-      "filePatterns": ["**/*.md"]
+      "syncDirection": "push"
     }
   ]
 }

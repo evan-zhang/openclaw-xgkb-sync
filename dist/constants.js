@@ -62,8 +62,47 @@ exports.API_ERROR_LOG_MAX_CHARS = 4096;
 exports.API_ERROR_MESSAGE_BODY_MAX = 800;
 /** mtime 比较容差（毫秒），消除精度误差 */
 exports.MTIME_TOLERANCE_MS = 1_000;
-/** 默认同步文件匹配模式 */
-exports.DEFAULT_FILE_PATTERNS = ['**/*.md'];
+/** 默认同步文件匹配模式：覆盖常见文本、配置、网页、脚本与结构化数据文件。 */
+exports.DEFAULT_FILE_PATTERNS = [
+    '**/*.md',
+    '**/*.markdown',
+    '**/*.mdx',
+    '**/*.txt',
+    '**/*.text',
+    '**/*.json',
+    '**/*.jsonl',
+    '**/*.yaml',
+    '**/*.yml',
+    '**/*.toml',
+    '**/*.ini',
+    '**/*.cfg',
+    '**/*.conf',
+    '**/*.properties',
+    '**/*.html',
+    '**/*.htm',
+    '**/*.css',
+    '**/*.scss',
+    '**/*.sass',
+    '**/*.less',
+    '**/*.xml',
+    '**/*.svg',
+    '**/*.csv',
+    '**/*.tsv',
+    '**/*.sql',
+    '**/*.log',
+    '**/*.js',
+    '**/*.jsx',
+    '**/*.ts',
+    '**/*.tsx',
+    '**/*.mjs',
+    '**/*.cjs',
+    '**/*.py',
+    '**/*.sh',
+    '**/*.bash',
+    '**/*.zsh',
+    '**/*.fish',
+    '**/*.ps1',
+];
 /** 默认排除匹配模式 */
 exports.DEFAULT_EXCLUDE_PATTERNS = ['**/_conflict_*', '**/.tmp/**'];
 /** 默认状态库文件路径 */

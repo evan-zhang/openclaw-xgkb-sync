@@ -57,7 +57,7 @@ export declare const API_ERROR_LOG_MAX_CHARS = 4096;
 export declare const API_ERROR_MESSAGE_BODY_MAX = 800;
 /** mtime 比较容差（毫秒），消除精度误差 */
 export declare const MTIME_TOLERANCE_MS = 1000;
-/** 默认同步文件匹配模式 */
+/** 默认同步文件匹配模式：覆盖常见文本、配置、网页、脚本与结构化数据文件。 */
 export declare const DEFAULT_FILE_PATTERNS: string[];
 /** 默认排除匹配模式 */
 export declare const DEFAULT_EXCLUDE_PATTERNS: string[];

@@ -180,7 +180,7 @@ npm run dev:config                   # 显式使用 ./config.json
 | `projectId` | 否 | 知识库空间 ID。不填则自动调用 `getPersonalProjectId` 获取个人空间 |
 | `remoteRootFileId` | 否 | 远端根目录 fileId。 |
 | `remoteRootFolderPath` | 否 | 远端根目录路径，如 `"OpenClaw/OutputA"`。**路径在远端不存在时会自动逐级创建**；不填表示同步 projectId 空间根目录 |
-| `filePatterns` | 否 | 匹配文件的 glob 模式，默认 `["**/*.md"]` |
+| `filePatterns` | 否 | 匹配文件的 glob 模式，默认同步常见文本/配置/网页/脚本/结构化数据文件，如 `.md`、`.json`、`.txt`、`.html`、`.css`、`.js`、`.ts`、`.yaml`、`.sql` 等 |
 | `excludePatterns` | 否 | 排除文件的 glob 模式，默认 `["**/_conflict_*", "**/.tmp/**"]` |
 | `syncDirection` | 否 | 单条 mapping 的同步方向，覆盖全局配置 |
 
@@ -211,8 +211,7 @@ npm run dev:config                   # 显式使用 ./config.json
       "localRoot": "/sandboxes/alice/workspace",
       "appKey": "alice-personal-app-key",
       "remoteRootFolderPath": "AgentOutput/Alice",
-      "syncDirection": "push",
-      "filePatterns": ["**/*.md"]
+      "syncDirection": "push"
     }
   ]
 }
@@ -277,8 +276,7 @@ curl -X POST http://10.0.0.5:9090/mappings \
     "localRoot": "/sandboxes/bob/workspace",
     "appKey": "bob-personal-app-key",
     "remoteRootFolderPath": "AgentOutput/Bob",
-    "syncDirection": "push",
-    "filePatterns": ["**/*.md"]
+    "syncDirection": "push"
   }'
 
 # 修改 mapping 配置（部分更新，只传要改的字段，其余字段保持原值）
@@ -496,8 +494,7 @@ npm start
       "mappingId": "my-workspace",
       "enabled": true,
       "localRoot": "C:/Users/Alice/.openclaw/workspace",
-      "remoteRootFolderPath": "OpenClaw/Alice",
-      "filePatterns": ["**/*.md"]
+      "remoteRootFolderPath": "OpenClaw/Alice"
     }
   ]
 }
