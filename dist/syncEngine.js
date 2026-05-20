@@ -65,7 +65,7 @@ class SyncEngine {
         this.db = db;
         this.mapping = mapping;
         this.filePatterns = mapping.filePatterns ?? constants_1.DEFAULT_FILE_PATTERNS;
-        this.excludePatterns = mapping.excludePatterns ?? constants_1.DEFAULT_EXCLUDE_PATTERNS;
+        this.excludePatterns = (0, constants_1.mergeDefaultExcludePatterns)(mapping.excludePatterns);
         this.downloadConcurrency = opts?.downloadConcurrency ?? constants_1.DOWNLOAD_CONCURRENCY;
         this.uploadConcurrency = opts?.uploadConcurrency ?? constants_1.UPLOAD_CONCURRENCY;
         this.stats = this.emptyStats();

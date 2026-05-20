@@ -53,7 +53,7 @@ class LocalFsAdapter {
     constructor(localRoot, filePatterns = constants_1.DEFAULT_FILE_PATTERNS, excludePatterns = constants_1.DEFAULT_EXCLUDE_PATTERNS) {
         this.localRoot = path.resolve(localRoot);
         this.filePatterns = filePatterns;
-        this.excludePatterns = excludePatterns;
+        this.excludePatterns = (0, constants_1.mergeDefaultExcludePatterns)(excludePatterns);
     }
     getRoot() {
         return this.localRoot;
@@ -87,8 +87,6 @@ class LocalFsAdapter {
         }
         const subDirTasks = [];
         for (const dirent of dirEntries) {
-            if (dirent.name.startsWith('.'))
-                continue;
             const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
             const absPath = path.join(absDir, dirent.name);
             if (dirent.isDirectory()) {
@@ -148,8 +146,6 @@ class LocalFsAdapter {
         }
         const subDirTasks = [];
         for (const dirent of dirEntries) {
-            if (dirent.name.startsWith('.'))
-                continue;
             if (!dirent.isDirectory())
                 continue;
             const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;

@@ -20,7 +20,7 @@
 
   "mappings": [
     {
-      "_comment": "极简配置：仅填 projectId，默认同步该空间根目录下常见文本文件（md/json/txt/html/css/js/ts/yaml/sql 等）",
+      "_comment": "极简配置：仅填 projectId，默认同步该空间根目录下常见文本、源码与工程配置文件（md/json/txt/html/css/js/ts/py/go/java/Dockerfile 等）",
       "mappingId": "map-personal-root",
       "enabled": false,
       "localRoot": "/data/openclaw/personal"

@@ -24,7 +24,7 @@ class RemoteFsAdapter {
         this.api = api;
         this.opts = opts;
         this.filePatterns = opts.filePatterns ?? constants_1.DEFAULT_FILE_PATTERNS;
-        this.excludePatterns = opts.excludePatterns ?? constants_1.DEFAULT_EXCLUDE_PATTERNS;
+        this.excludePatterns = (0, constants_1.mergeDefaultExcludePatterns)(opts.excludePatterns);
     }
     getRootFileId() {
         if (!this.resolvedRootFileId)

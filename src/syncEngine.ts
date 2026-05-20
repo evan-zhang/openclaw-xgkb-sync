@@ -15,10 +15,10 @@ import {
 } from './types';
 import {
   CHANGES_SAFETY_WINDOW_MS,
-  DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_FILE_PATTERNS,
   DOWNLOAD_CONCURRENCY,
   EXECUTE_BATCH_PAUSE_MS,
+  mergeDefaultExcludePatterns,
   MTIME_TOLERANCE_MS,
   UPLOAD_CONCURRENCY,
 } from './constants';
@@ -69,7 +69,7 @@ export class SyncEngine {
     this.db = db;
     this.mapping = mapping;
     this.filePatterns = mapping.filePatterns ?? DEFAULT_FILE_PATTERNS;
-    this.excludePatterns = mapping.excludePatterns ?? DEFAULT_EXCLUDE_PATTERNS;
+    this.excludePatterns = mergeDefaultExcludePatterns(mapping.excludePatterns);
     this.downloadConcurrency = opts?.downloadConcurrency ?? DOWNLOAD_CONCURRENCY;
     this.uploadConcurrency = opts?.uploadConcurrency ?? UPLOAD_CONCURRENCY;
     this.stats = this.emptyStats();

@@ -15,6 +15,7 @@ import {
   DEFAULT_RATE_LIMIT_BURST,
   DEFAULT_SERVER_URL,
   DOWNLOAD_CONCURRENCY,
+  mergeDefaultExcludePatterns,
   RATE_LIMIT_COOLDOWN_MS,
   STARTUP_JITTER_MAX_MS,
   UPLOAD_CONCURRENCY,
@@ -301,9 +302,9 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     ? (m.filePatterns as string[])
     : DEFAULT_FILE_PATTERNS;
 
-  const excludePatterns = Array.isArray(m.excludePatterns)
-    ? (m.excludePatterns as string[])
-    : DEFAULT_EXCLUDE_PATTERNS;
+  const excludePatterns = mergeDefaultExcludePatterns(
+    Array.isArray(m.excludePatterns) ? (m.excludePatterns as string[]) : undefined,
+  );
 
   const mappingAppKey =
     typeof m.appKey === 'string' && (m.appKey as string).trim()

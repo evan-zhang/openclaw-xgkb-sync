@@ -3,7 +3,7 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 import micromatch from 'micromatch';
 import { LocalFileEntry } from './types';
-import { DEFAULT_EXCLUDE_PATTERNS, DEFAULT_FILE_PATTERNS } from './constants';
+import { DEFAULT_EXCLUDE_PATTERNS, DEFAULT_FILE_PATTERNS, mergeDefaultExcludePatterns } from './constants';
 import { canonicalizeRelativeSyncPath, normalizeSeparator, sanitizePathSegment } from './pathSanitize';
 
 /**
@@ -22,7 +22,7 @@ export class LocalFsAdapter {
   ) {
     this.localRoot = path.resolve(localRoot);
     this.filePatterns = filePatterns;
-    this.excludePatterns = excludePatterns;
+    this.excludePatterns = mergeDefaultExcludePatterns(excludePatterns);
   }
 
   getRoot(): string {
@@ -65,8 +65,6 @@ export class LocalFsAdapter {
     const subDirTasks: Promise<void>[] = [];
 
     for (const dirent of dirEntries) {
-      if (dirent.name.startsWith('.')) continue;
-
       const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
       const absPath = path.join(absDir, dirent.name);
 
@@ -132,7 +130,6 @@ export class LocalFsAdapter {
 
     const subDirTasks: Promise<void>[] = [];
     for (const dirent of dirEntries) {
-      if (dirent.name.startsWith('.')) continue;
       if (!dirent.isDirectory()) continue;
 
       const relPath = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;

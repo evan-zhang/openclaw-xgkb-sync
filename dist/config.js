@@ -276,9 +276,7 @@ function validateMapping(raw, idx, filePath) {
     const filePatterns = Array.isArray(m.filePatterns)
         ? m.filePatterns
         : constants_1.DEFAULT_FILE_PATTERNS;
-    const excludePatterns = Array.isArray(m.excludePatterns)
-        ? m.excludePatterns
-        : constants_1.DEFAULT_EXCLUDE_PATTERNS;
+    const excludePatterns = (0, constants_1.mergeDefaultExcludePatterns)(Array.isArray(m.excludePatterns) ? m.excludePatterns : undefined);
     const mappingAppKey = typeof m.appKey === 'string' && m.appKey.trim()
         ? m.appKey.trim()
         : undefined;

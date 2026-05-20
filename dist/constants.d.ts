@@ -61,6 +61,7 @@ export declare const MTIME_TOLERANCE_MS = 1000;
 export declare const DEFAULT_FILE_PATTERNS: string[];
 /** 默认排除匹配模式 */
 export declare const DEFAULT_EXCLUDE_PATTERNS: string[];
+export declare function mergeDefaultExcludePatterns(patterns?: string[]): string[];
 /** 默认状态库文件路径 */
 export declare const DEFAULT_DB_PATH = "./openclaw-sync-state.db";
 /** 默认知识库 Open API 根地址（生产环境） */

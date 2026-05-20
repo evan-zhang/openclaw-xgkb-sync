@@ -4,9 +4,9 @@ import { ApiResult, FileMeta, ListChangesItem, RemoteFileEntry } from './types';
 import {
   BATCH_GET_META_MAX,
   DEFAULT_FILE_PATTERNS,
-  DEFAULT_EXCLUDE_PATTERNS,
   DOWNLOAD_CONCURRENCY,
   extractUniqueSuffix,
+  mergeDefaultExcludePatterns,
 } from './constants';
 import { canonicalizeRelativeSyncPath, sanitizePathSegment } from './pathSanitize';
 
@@ -69,7 +69,7 @@ export class RemoteFsAdapter {
     this.api = api;
     this.opts = opts;
     this.filePatterns = opts.filePatterns ?? DEFAULT_FILE_PATTERNS;
-    this.excludePatterns = opts.excludePatterns ?? DEFAULT_EXCLUDE_PATTERNS;
+    this.excludePatterns = mergeDefaultExcludePatterns(opts.excludePatterns);
   }
 
   getRootFileId(): string {
