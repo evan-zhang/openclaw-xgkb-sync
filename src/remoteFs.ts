@@ -296,6 +296,16 @@ export class RemoteFsAdapter {
       cursor = r.value.nextCursor ?? undefined;
     } while (cursor);
 
+    const collision = findPathCollision(entries);
+    if (collision) {
+      return {
+        ok: false,
+        error:
+          `远端路径规范化后发生冲突，已停止同步以避免覆盖文件: ${collision.path}` +
+          ` (fileId=${collision.first.remoteFileId} / ${collision.second.remoteFileId})`,
+      };
+    }
+
     console.log(`[RemoteFs] listDescendantFiles done: ${entries.length} files in ${page} pages`);
     return { ok: true, value: entries };
   }
@@ -626,4 +636,18 @@ function getFileSuffix(fileName: string): string | undefined {
   const dot = fileName.lastIndexOf('.');
   if (dot <= 0 || dot === fileName.length - 1) return undefined;
   return fileName.slice(dot + 1).toLowerCase();
+}
+
+function findPathCollision(
+  entries: RemoteFileEntry[],
+): { path: string; first: RemoteFileEntry; second: RemoteFileEntry } | null {
+  const seen = new Map<string, RemoteFileEntry>();
+  for (const entry of entries) {
+    const existing = seen.get(entry.path);
+    if (existing && existing.remoteFileId !== entry.remoteFileId) {
+      return { path: entry.path, first: existing, second: entry };
+    }
+    seen.set(entry.path, entry);
+  }
+  return null;
 }

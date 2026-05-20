@@ -36,6 +36,7 @@ export class LocalFsAdapter {
   async listFiles(): Promise<LocalFileEntry[]> {
     const entries: LocalFileEntry[] = [];
     await this.walk(this.localRoot, '', entries);
+    this.assertNoPathCollisions(entries);
     return entries;
   }
 
@@ -99,6 +100,21 @@ export class LocalFsAdapter {
 
     if (subDirTasks.length > 0) {
       await Promise.all(subDirTasks);
+    }
+  }
+
+  private assertNoPathCollisions(entries: LocalFileEntry[]): void {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const entry of entries) {
+      if (seen.has(entry.path)) duplicates.add(entry.path);
+      seen.add(entry.path);
+    }
+    if (duplicates.size > 0) {
+      const sample = [...duplicates].slice(0, 10).join(', ');
+      throw new Error(
+        `本地路径规范化后发生冲突，已停止同步以避免覆盖文件: ${sample}`,
+      );
     }
   }
 

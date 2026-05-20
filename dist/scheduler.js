@@ -36,7 +36,10 @@ class SyncScheduler {
     /** 按 appKey 分组的限速器，每个 appKey 独享自己的令牌桶 */
     limiters = new Map();
     runStates = new Map();
+    mappingQueue = [];
+    queuedMappingIds = new Set();
     timers = [];
+    activeMappingRuns = 0;
     running = false;
     constructor(config) {
         this.config = config;
@@ -79,7 +82,8 @@ class SyncScheduler {
         const jitterMs = jitterMaxMs > 0 ? Math.floor(Math.random() * jitterMaxMs) : 0;
         if (jitterMs > 500) {
             console.log(`[Scheduler] 启动抖动 ${Math.round(jitterMs / 1000)}s，首次同步约在 ${new Date(Date.now() + jitterMs).toLocaleTimeString('zh-CN')} 开始`);
-            setTimeout(() => this.triggerAll('启动后初始同步'), jitterMs);
+            const timer = setTimeout(() => this.triggerAll('启动后初始同步'), jitterMs);
+            this.timers.push(timer);
         }
         else {
             this.triggerAll('启动后初始同步');
@@ -100,6 +104,9 @@ class SyncScheduler {
             clearInterval(t);
         this.timers = [];
         this.limiters.clear();
+        this.mappingQueue.length = 0;
+        this.queuedMappingIds.clear();
+        this.activeMappingRuns = 0;
         this.db.close();
         console.log('[Scheduler] 已停止');
     }
@@ -116,18 +123,8 @@ class SyncScheduler {
     triggerAll(reason) {
         const enabledMappings = this.config.mappings.filter((m) => m.enabled);
         console.log(`[Scheduler] 触发全部同步（${reason}），共 ${enabledMappings.length} 条`);
-        const maxConcurrent = resolveMaxConcurrentMappings(this.config);
-        // 按并发度批次触发
-        let queued = 0;
         for (const mapping of enabledMappings) {
-            queued++;
-            if (queued <= maxConcurrent) {
-                this.scheduleMapping(mapping);
-            }
-            else {
-                // 超出并发限制的，稍后触发
-                setTimeout(() => this.scheduleMapping(mapping), (queued - maxConcurrent) * 500);
-            }
+            this.scheduleMapping(mapping);
         }
     }
     scheduleMapping(mapping) {
@@ -141,6 +138,20 @@ class SyncScheduler {
             console.log(`[Scheduler][${mapping.mappingId}] 已在同步中，标记为待执行`);
             return;
         }
+        const maxConcurrent = resolveMaxConcurrentMappings(this.config);
+        if (this.activeMappingRuns >= maxConcurrent) {
+            state.pendingSync = true;
+            if (!this.queuedMappingIds.has(mapping.mappingId)) {
+                this.mappingQueue.push(mapping);
+                this.queuedMappingIds.add(mapping.mappingId);
+                console.log(`[Scheduler][${mapping.mappingId}] 已加入同步队列（运行中 ${this.activeMappingRuns}/${maxConcurrent}）`);
+            }
+            return;
+        }
+        this.startMappingSync(mapping, state);
+    }
+    startMappingSync(mapping, state) {
+        this.activeMappingRuns++;
         this.runMappingSync(mapping, state).catch((e) => {
             console.error(`[Scheduler][${mapping.mappingId}] 意外异常:`, e);
         });
@@ -153,12 +164,28 @@ class SyncScheduler {
         }
         finally {
             state.isSyncing = false;
+            this.activeMappingRuns = Math.max(0, this.activeMappingRuns - 1);
             // 若同步期间有新触发，再执行一轮
             if (state.pendingSync) {
                 state.pendingSync = false;
                 console.log(`[Scheduler][${mapping.mappingId}] 执行待挂起的同步`);
-                setTimeout(() => this.scheduleMapping(mapping), 0);
+                this.scheduleMapping(mapping);
             }
+            this.drainMappingQueue();
+        }
+    }
+    drainMappingQueue() {
+        if (!this.running)
+            return;
+        const maxConcurrent = resolveMaxConcurrentMappings(this.config);
+        while (this.activeMappingRuns < maxConcurrent && this.mappingQueue.length > 0) {
+            const mapping = this.mappingQueue.shift();
+            this.queuedMappingIds.delete(mapping.mappingId);
+            const state = this.runStates.get(mapping.mappingId);
+            if (!state || state.isSyncing)
+                continue;
+            state.pendingSync = false;
+            this.startMappingSync(mapping, state);
         }
     }
     async doSync(mapping) {

@@ -12,7 +12,10 @@ export declare class SyncScheduler {
     /** 按 appKey 分组的限速器，每个 appKey 独享自己的令牌桶 */
     private readonly limiters;
     private readonly runStates;
+    private readonly mappingQueue;
+    private readonly queuedMappingIds;
     private timers;
+    private activeMappingRuns;
     private running;
     constructor(config: SyncConfig);
     /**
@@ -29,7 +32,9 @@ export declare class SyncScheduler {
     /** 触发所有已启用 mapping */
     private triggerAll;
     private scheduleMapping;
+    private startMappingSync;
     private runMappingSync;
+    private drainMappingQueue;
     private doSync;
     /** 获取当前生效的配置（供 ManagementApi 读取） */
     getConfig(): SyncConfig;

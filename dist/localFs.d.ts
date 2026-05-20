@@ -20,6 +20,7 @@ export declare class LocalFsAdapter {
      */
     listDirectories(): Promise<string[]>;
     private walk;
+    private assertNoPathCollisions;
     private walkDirectories;
     /** 读取文件内容（UTF-8） */
     readFile(relativePath: string): Promise<string>;

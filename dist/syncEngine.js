@@ -301,6 +301,15 @@ class SyncEngine {
         }
         // 构建最终 remoteMap
         const map = new Map();
+        const addRemoteEntry = (entry) => {
+            const existing = map.get(entry.path);
+            if (existing && existing.remoteFileId !== entry.remoteFileId) {
+                prog(`发现远端路径冲突 "${entry.path}"（fileId=${existing.remoteFileId} / ${entry.remoteFileId}），降级全量对账...`);
+                return false;
+            }
+            map.set(entry.path, entry);
+            return true;
+        };
         // 未变更的已知文件（过滤不匹配的）
         for (const record of allRecords) {
             const id = record.remoteFileId ?? '';
@@ -308,18 +317,24 @@ class SyncEngine {
                 continue;
             if (!this.matchesSync(record.localPath))
                 continue;
-            map.set(record.localPath, {
+            if (!addRemoteEntry({
                 path: record.localPath,
                 name: record.localPath.split('/').pop() ?? record.localPath,
                 mtime: record.remoteMtime ?? 0,
                 remoteFileId: id,
                 remoteFolderId: record.remoteFolderId ?? '',
-            });
+            }))
+                return null;
         }
         // 已知 upsert：刷新元数据（过滤不匹配的）
         if (knownUpsertIds.length > 0) {
             prog(`批量获取 ${knownUpsertIds.length} 个变更文件元数据...`);
             const metaMap = await this.remoteFs.batchGetMetaAll(knownUpsertIds);
+            const missingMetaIds = knownUpsertIds.filter((id) => !metaMap.has(id));
+            if (missingMetaIds.length > 0) {
+                prog(`有 ${missingMetaIds.length} 个已知变更文件未取到元数据，降级全量对账，避免误判删除...`);
+                return null;
+            }
             for (const id of knownUpsertIds) {
                 const meta = metaMap.get(id);
                 const record = fileIdToRecord.get(id);
@@ -327,24 +342,26 @@ class SyncEngine {
                     continue;
                 if (!this.matchesSync(record.localPath))
                     continue;
-                map.set(record.localPath, {
+                if (!addRemoteEntry({
                     path: record.localPath,
                     name: meta.name ?? record.localPath.split('/').pop() ?? record.localPath,
                     mtime: meta.updateTime ?? (record.remoteMtime ?? 0),
                     remoteFileId: id,
                     remoteFolderId: meta.parentId != null ? String(meta.parentId) : (record.remoteFolderId ?? ''),
-                });
+                }))
+                    return null;
             }
         }
         // 路径重建的新文件（已过滤）
         for (const { id, path, item } of filteredNewFiles) {
-            map.set(path, {
+            if (!addRemoteEntry({
                 path,
                 name: item.name ?? path.split('/').pop() ?? path,
                 mtime: item.updateTime ?? Date.now(),
                 remoteFileId: id,
                 remoteFolderId: item.parentId != null ? String(item.parentId) : '',
-            });
+            }))
+                return null;
         }
         this.removePathsUnderFileNodes(map, prog);
         return { map, newSince, fullScan: false, remoteDeltaCount: upsertById.size + deleteIds.size };
@@ -538,10 +555,11 @@ class SyncEngine {
         if (!result.ok)
             throw new Error(result.error);
         const now = Date.now();
+        const nextRemoteFileId = result.value || remoteFileId;
         const next = record
             ? {
                 ...record,
-                remoteFileId,
+                remoteFileId: nextRemoteFileId,
                 remoteFolderId: remote?.remoteFolderId ?? record.remoteFolderId ?? '',
                 localMtime: local.mtime,
                 remoteMtime: now + constants_1.MTIME_TOLERANCE_MS,
@@ -552,7 +570,7 @@ class SyncEngine {
             : {
                 mappingId: this.mapping.mappingId,
                 localPath: path,
-                remoteFileId,
+                remoteFileId: nextRemoteFileId,
                 remoteFolderId: remote?.remoteFolderId ?? '',
                 localMtime: local.mtime,
                 remoteMtime: now + constants_1.MTIME_TOLERANCE_MS,
