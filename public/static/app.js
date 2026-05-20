@@ -601,11 +601,12 @@
     const data = await api('GET', `/logs?${params.toString()}`);
     logsLoaded = true;
     const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleString() : '—';
+    const retention = data.retentionHours ? `最近 ${data.retentionHours} 小时` : '最近日志';
     const truncated = data.truncatedBytes
       ? ` · 仅读取末尾 ${Math.round((data.fileSize - data.truncatedBytes) / 1024)} KB`
       : '';
     meta.textContent =
-      `${data.lineCount} 行 · 更新 ${updated}` +
+      `${retention} · ${data.lineCount} 行 · 更新 ${updated}` +
       `${data.mappingId ? ` · 映射 ${data.mappingId}` : ''}` +
       `${data.level ? ` · ${data.level}` : ''}${truncated}`;
     viewer.innerHTML = (data.lines || [])

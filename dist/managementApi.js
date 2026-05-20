@@ -53,6 +53,7 @@ function readVersion() {
     }
 }
 const VERSION = readVersion();
+const LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
 /** 静态管理页面目录（与 dist/ 或 src/ 同级的 public/） */
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
 /** 仅用于界面展示的脱敏 AppKey，避免返回明文。 */
@@ -68,6 +69,13 @@ function clampInt(value, min, max, fallback) {
     if (!Number.isFinite(value))
         return fallback;
     return Math.min(max, Math.max(min, Math.floor(value)));
+}
+function parseLogLineTime(line) {
+    const match = line.match(/^\[(\d{4}-\d{2}-\d{2}T[^\]]+Z)\]/);
+    if (!match)
+        return null;
+    const ts = Date.parse(match[1]);
+    return Number.isFinite(ts) ? ts : null;
 }
 /** 可通过 PUT /config 修改的全局字段（managementPort/Host 需重启进程才生效） */
 const EDITABLE_CONFIG_FIELDS = [
@@ -293,8 +301,12 @@ class ManagementApi {
         try {
             const buf = Buffer.alloc(stat.size - start);
             fs.readSync(fd, buf, 0, buf.length, start);
+            const since = Date.now() - LOG_RETENTION_MS;
             const allLines = buf.toString('utf-8').split(/\r?\n/).filter(Boolean);
             const filtered = allLines.filter((line) => {
+                const ts = parseLogLineTime(line);
+                if (ts !== null && ts < since)
+                    return false;
                 if (mappingId && !line.includes(mappingId))
                     return false;
                 if (levelFilter && !line.includes(`[${levelFilter}]`))
@@ -310,6 +322,7 @@ class ManagementApi {
                 lines: tail,
                 lineCount: tail.length,
                 requestedLines: lines,
+                retentionHours: 24,
                 mappingId: mappingId || null,
                 level: levelFilter || null,
                 updatedAt: new Date(stat.mtimeMs).toISOString(),
