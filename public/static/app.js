@@ -8,6 +8,7 @@
   let globalAppKeyMasked = '';
   let mappingsCache = [];
   let statusCache = null;
+  let logsLoaded = false;
 
   // ==================== API ====================
 
@@ -163,6 +164,7 @@
       $$('.panel').forEach((p) => p.classList.remove('active'));
       tab.classList.add('active');
       $(`#panel-${tab.dataset.tab}`).classList.add('active');
+      if (tab.dataset.tab === 'logs') loadLogs().catch((e) => toast(e.message, 'error'));
     });
   });
 
@@ -277,6 +279,7 @@
     hasGlobalAppKey = data.hasGlobalAppKey;
     mappingsCache = data.mappings || [];
     renderMappings();
+    renderLogMappingFilter();
     updateGlobalAppKeyHint();
   }
 
@@ -562,8 +565,69 @@
     updateMappingConcurrencyUi();
   }
 
+  // ==================== Logs ====================
+
+  function renderLogMappingFilter() {
+    const select = $('#logMappingFilter');
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = '<option value="">全部映射</option>' + mappingsCache
+      .map((m) => `<option value="${escapeHtml(m.mappingId)}">${escapeHtml(m.mappingId)}</option>`)
+      .join('');
+    if (current && mappingsCache.some((m) => m.mappingId === current)) {
+      select.value = current;
+    }
+  }
+
+  function logLineClass(line) {
+    if (line.includes('[ERROR]')) return 'log-line log-error';
+    if (line.includes('[WARN]')) return 'log-line log-warn';
+    return 'log-line';
+  }
+
+  async function loadLogs() {
+    const mappingId = $('#logMappingFilter')?.value || '';
+    const level = $('#logLevelFilter')?.value || '';
+    const lines = $('#logLineCount')?.value || '500';
+    const params = new URLSearchParams({ lines });
+    if (mappingId) params.set('mappingId', mappingId);
+    if (level) params.set('level', level);
+
+    const meta = $('#logMeta');
+    const viewer = $('#logViewer');
+    meta.textContent = '正在读取日志…';
+    viewer.textContent = '加载中…';
+
+    const data = await api('GET', `/logs?${params.toString()}`);
+    logsLoaded = true;
+    const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleString() : '—';
+    const truncated = data.truncatedBytes
+      ? ` · 仅读取末尾 ${Math.round((data.fileSize - data.truncatedBytes) / 1024)} KB`
+      : '';
+    meta.textContent =
+      `${data.lineCount} 行 · 更新 ${updated}` +
+      `${data.mappingId ? ` · 映射 ${data.mappingId}` : ''}` +
+      `${data.level ? ` · ${data.level}` : ''}${truncated}`;
+    viewer.innerHTML = (data.lines || [])
+      .map((line) => `<span class="${logLineClass(line)}">${escapeHtml(line)}</span>`)
+      .join('\n') || '<span class="log-line">暂无日志</span>';
+    viewer.scrollTop = viewer.scrollHeight;
+  }
+
+  $('#btnRefreshLogs')?.addEventListener('click', () => {
+    loadLogs()
+      .then(() => toast('日志已刷新', 'success'))
+      .catch((e) => toast(e.message, 'error'));
+  });
+  $('#logMappingFilter')?.addEventListener('change', () => loadLogs().catch((e) => toast(e.message, 'error')));
+  $('#logLevelFilter')?.addEventListener('change', () => loadLogs().catch((e) => toast(e.message, 'error')));
+  $('#logLineCount')?.addEventListener('change', () => loadLogs().catch((e) => toast(e.message, 'error')));
+
   async function refreshAll() {
     await Promise.all([loadHealth(), loadMappings(), loadGlobalConfig(), refreshStatus()]);
+    if (logsLoaded || $('#panel-logs')?.classList.contains('active')) {
+      await loadLogs();
+    }
   }
 
   // ==================== Toolbar actions ====================

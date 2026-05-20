@@ -36,6 +36,7 @@
       <button type="button" class="tab active" data-tab="mappings">同步映射</button>
       <button type="button" class="tab" data-tab="global">全局配置</button>
       <button type="button" class="tab" data-tab="status">运行状态</button>
+      <button type="button" class="tab" data-tab="logs">同步日志</button>
     </nav>
 
     <!-- 同步映射 -->
@@ -144,6 +145,33 @@
         <h2>运行状态</h2>
       </div>
       <div class="status-grid" id="statusGrid"></div>
+    </section>
+
+    <!-- 同步日志 -->
+    <section class="panel" id="panel-logs">
+      <div class="panel-head">
+        <h2>同步日志</h2>
+        <div class="log-actions">
+          <select id="logMappingFilter" aria-label="按映射过滤">
+            <option value="">全部映射</option>
+          </select>
+          <select id="logLevelFilter" aria-label="按级别过滤">
+            <option value="">全部级别</option>
+            <option value="ERROR">错误</option>
+            <option value="WARN">警告</option>
+            <option value="INFO">信息</option>
+          </select>
+          <select id="logLineCount" aria-label="日志行数">
+            <option value="200">最近 200 行</option>
+            <option value="500" selected>最近 500 行</option>
+            <option value="1000">最近 1000 行</option>
+            <option value="2000">最近 2000 行</option>
+          </select>
+          <button type="button" class="btn btn-secondary" id="btnRefreshLogs">刷新日志</button>
+        </div>
+      </div>
+      <div class="log-meta" id="logMeta">加载中…</div>
+      <pre class="log-viewer" id="logViewer">加载中…</pre>
     </section>
   </div>
 

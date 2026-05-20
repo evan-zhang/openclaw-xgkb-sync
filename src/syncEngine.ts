@@ -192,6 +192,7 @@ export class SyncEngine {
     for (const plan of deletePlans) {
       await this.executePlan(plan);
     }
+    const hasRemoteDelete = deletePlans.some((p) => p.op === 'delete-remote');
 
     // 2. 下载：按 downloadConcurrency 分批，批间加 pause，由 KbApiClient 限速器节流
     if (downloadPlans.length > 0) {
@@ -205,7 +206,10 @@ export class SyncEngine {
       await this.executePlansInQueue(uploadPlans, this.uploadConcurrency, '上传', prog);
     }
 
-    await this.pruneRemoteEmptyDirectories(prog);
+    await this.pruneRemoteEmptyDirectories(prog, {
+      hadRemoteDelete: hasRemoteDelete,
+      reason: hasRemoteDelete ? '远端文件删除后的目录整理' : undefined,
+    });
 
     prog(
       `完成: ↑${this.stats.uploaded} ↓${this.stats.downloaded} ✗${this.stats.deleted}` +
@@ -214,10 +218,17 @@ export class SyncEngine {
     return this.stats;
   }
 
-  private async pruneRemoteEmptyDirectories(prog: ProgressCallback): Promise<void> {
+  private async pruneRemoteEmptyDirectories(
+    prog: ProgressCallback,
+    opts?: { hadRemoteDelete?: boolean; reason?: string },
+  ): Promise<void> {
     const dir = this.mapping.syncDirection ?? 'bidirectional';
     if (dir === 'pull') return;
+    if (!opts?.hadRemoteDelete) return;
 
+    if (opts.reason) {
+      prog(`开始清理远端空目录（${opts.reason}）...`);
+    }
     const localDirs = new Set(await this.localFs.listDirectories());
     const result = await this.remoteFs.pruneEmptyDirectories(localDirs);
     if (!result.ok) {

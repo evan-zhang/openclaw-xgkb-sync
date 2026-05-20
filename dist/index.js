@@ -103,6 +103,7 @@ async function main() {
         port: config.managementPort ?? 9090,
         host: config.managementHost ?? constants_1.DEFAULT_MANAGEMENT_HOST,
         configPath: absConfigPath,
+        logFilePath: logFilePath ? path.resolve(logFilePath) : undefined,
         getScheduler: () => schedulerRef.current,
         onReload: doReload,
     });

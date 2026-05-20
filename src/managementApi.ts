@@ -32,6 +32,11 @@ function maskSecret(value?: string): string | undefined {
   return `${secret.slice(0, 4)}${'•'.repeat(Math.min(secret.length - 8, 24))}${secret.slice(-4)}`;
 }
 
+function clampInt(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 /** 可通过 PUT /config 修改的全局字段（managementPort/Host 需重启进程才生效） */
 const EDITABLE_CONFIG_FIELDS = [
   'serverUrl',
@@ -61,6 +66,8 @@ export interface ManagementApiOptions {
   host: string;
   /** config.json 的绝对路径，供 mapping CRUD 接口读写 */
   configPath: string;
+  /** 可选运行日志文件路径，供管理控制台只读展示 */
+  logFilePath?: string;
   /** 获取当前 scheduler 实例（reload 后引用会变） */
   getScheduler: () => SyncScheduler;
   /** 热重载回调：重新读取配置文件并重建 scheduler，返回新配置或错误 */
@@ -101,6 +108,7 @@ export class ManagementApi {
       console.log(`[ManagementApi] 可用接口:`);
       console.log(`  GET    /health`);
       console.log(`  GET    /status`);
+      console.log(`  GET    /logs`);
       console.log(`  GET    /mappings`);
       console.log(`  POST   /mappings          新增 mapping`);
       console.log(`  PUT    /mappings/:id       upsert mapping（存在则更新，不存在则创建）`);
@@ -129,7 +137,8 @@ export class ManagementApi {
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
     const url = req.url ?? '/';
-    const urlPath = url.split('?')[0];
+    const parsedUrl = new URL(url, `http://${this.opts.host}:${this.opts.port}`);
+    const urlPath = parsedUrl.pathname;
 
     // GET / — 管理控制台
     if (method === 'GET' && (urlPath === '/' || urlPath === '/index.html')) {
@@ -150,6 +159,11 @@ export class ManagementApi {
     // GET /status
     if (method === 'GET' && urlPath === '/status') {
       return this.handleStatus(res);
+    }
+
+    // GET /logs
+    if (method === 'GET' && urlPath === '/logs') {
+      return this.handleLogs(res, parsedUrl.searchParams);
     }
 
     // POST /reload
@@ -262,6 +276,63 @@ export class ManagementApi {
       },
       mappings,
     });
+  }
+
+  private handleLogs(res: http.ServerResponse, params: URLSearchParams): void {
+    const logFilePath = this.opts.logFilePath;
+    if (!logFilePath) {
+      return this.sendJson(res, 404, {
+        ok: false,
+        error: '当前进程未配置日志文件。请用 --log-file 或 OPENCLAW_SYNC_LOG_FILE 启动服务。',
+      });
+    }
+
+    const lines = clampInt(Number(params.get('lines') || 300), 50, 2000, 300);
+    const mappingId = (params.get('mappingId') || '').trim();
+    const level = (params.get('level') || '').trim().toUpperCase();
+    const allowedLevels = new Set(['INFO', 'WARN', 'ERROR']);
+    const levelFilter = allowedLevels.has(level) ? level : '';
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(logFilePath);
+      if (!stat.isFile()) throw new Error('日志路径不是文件');
+    } catch (e) {
+      return this.sendJson(res, 404, {
+        ok: false,
+        error: `日志文件不可读取: ${e instanceof Error ? e.message : String(e)}`,
+        logFilePath,
+      });
+    }
+
+    const maxBytes = 2 * 1024 * 1024;
+    const start = Math.max(0, stat.size - maxBytes);
+    const fd = fs.openSync(logFilePath, 'r');
+    try {
+      const buf = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      const allLines = buf.toString('utf-8').split(/\r?\n/).filter(Boolean);
+      const filtered = allLines.filter((line) => {
+        if (mappingId && !line.includes(mappingId)) return false;
+        if (levelFilter && !line.includes(`[${levelFilter}]`)) return false;
+        return true;
+      });
+      const tail = filtered.slice(-lines);
+      this.sendJson(res, 200, {
+        ok: true,
+        logFilePath,
+        fileSize: stat.size,
+        truncatedBytes: start,
+        lines: tail,
+        lineCount: tail.length,
+        requestedLines: lines,
+        mappingId: mappingId || null,
+        level: levelFilter || null,
+        updatedAt: new Date(stat.mtimeMs).toISOString(),
+      });
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 
   private handleReload(res: http.ServerResponse): void {

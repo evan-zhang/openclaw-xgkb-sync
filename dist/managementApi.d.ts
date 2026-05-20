@@ -12,6 +12,8 @@ export interface ManagementApiOptions {
     host: string;
     /** config.json 的绝对路径，供 mapping CRUD 接口读写 */
     configPath: string;
+    /** 可选运行日志文件路径，供管理控制台只读展示 */
+    logFilePath?: string;
     /** 获取当前 scheduler 实例（reload 后引用会变） */
     getScheduler: () => SyncScheduler;
     /** 热重载回调：重新读取配置文件并重建 scheduler，返回新配置或错误 */
@@ -32,6 +34,7 @@ export declare class ManagementApi {
     private handle;
     private handleHealth;
     private handleStatus;
+    private handleLogs;
     private handleReload;
     private handleSyncAll;
     private handleSyncOne;
