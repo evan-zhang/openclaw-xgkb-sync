@@ -345,6 +345,14 @@
       $('input[name="remoteRootFolderPath"]', mappingForm).value = m.remoteRootFolderPath || '';
       $('input[name="remoteRootFileId"]', mappingForm).value = m.remoteRootFileId || '';
       $('select[name="syncDirection"]', mappingForm).value = m.syncDirection || '';
+      $('select[name="moveNameConflictStrategy"]', mappingForm).value =
+        m.moveNameConflictStrategy === undefined || m.moveNameConflictStrategy === null
+          ? ''
+          : String(m.moveNameConflictStrategy);
+      $('select[name="renameNameConflictStrategy"]', mappingForm).value =
+        m.renameNameConflictStrategy === undefined || m.renameNameConflictStrategy === null
+          ? ''
+          : String(m.renameNameConflictStrategy);
       $('input[name="filePatterns"]', mappingForm).value =
         m.filePatterns ? JSON.stringify(m.filePatterns) : '';
       $('input[name="excludePatterns"]', mappingForm).value =
@@ -387,6 +395,12 @@
 
     const syncDir = (fd.get('syncDirection') || '').toString();
     if (syncDir) body.syncDirection = syncDir;
+
+    const moveConflict = (fd.get('moveNameConflictStrategy') || '').toString().trim();
+    if (moveConflict) body.moveNameConflictStrategy = Number(moveConflict);
+
+    const renameConflict = (fd.get('renameNameConflictStrategy') || '').toString().trim();
+    if (renameConflict) body.renameNameConflictStrategy = Number(renameConflict);
 
     try {
       const fp = parseJsonArray((fd.get('filePatterns') || '').toString());

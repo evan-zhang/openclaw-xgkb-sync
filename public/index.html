@@ -200,6 +200,26 @@
           </select>
         </label>
         <label>
+          <span>移动冲突策略 (moveNameConflictStrategy)</span>
+          <select name="moveNameConflictStrategy">
+            <option value="">默认（3=跳过）</option>
+            <option value="0">0 = 重命名</option>
+            <option value="1">1 = 覆盖</option>
+            <option value="2">2 = 抛异常</option>
+            <option value="3">3 = 跳过</option>
+          </select>
+          <small>用于 moveFile 同名冲突；建议默认或 3（跳过）更安全。</small>
+        </label>
+        <label>
+          <span>重命名冲突策略 (renameNameConflictStrategy)</span>
+          <select name="renameNameConflictStrategy">
+            <option value="">默认（1=抛异常）</option>
+            <option value="0">0 = 自动重命名</option>
+            <option value="1">1 = 抛异常</option>
+          </select>
+          <small>用于 updateFileName 同名冲突；默认 1（抛异常）。</small>
+        </label>
+        <label>
           <span>文件匹配 (filePatterns)</span>
           <input type="text" name="filePatterns" placeholder='["**/*.md"]' />
           <small>JSON 数组，留空使用默认</small>

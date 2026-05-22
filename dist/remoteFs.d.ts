@@ -1,5 +1,5 @@
 import { KbApiClient } from './kbApi';
-import { ApiResult, FileMeta, ListChangesItem, RemoteFileEntry } from './types';
+import { ApiResult, FileMeta, ListChangesItem, MoveFileParams, MoveFileResult, RemoteFileEntry, UpdateFileNameParams, UpdateFileNameResult } from './types';
 export interface RemoteFsOptions {
     /** Knowledge base project ID. If omitted, init() resolves the personal project ID. */
     projectId?: string;
@@ -93,6 +93,15 @@ export declare class RemoteFsAdapter {
      * Update a remote file version through uploadContent + updateFileId.
      */
     updateFile(remoteFileId: string, fileName: string, content: string): Promise<ApiResult<string>>;
+    /**
+     * 重命名远端文件或文件夹（同目录内改名，不移动）。
+     * 对应 KB v2 updateFileName 接口。
+     */
+    renameFile(params: UpdateFileNameParams): Promise<ApiResult<UpdateFileNameResult>>;
+    /**
+     * 移动远端节点。同步侧不传 newName（换目录+改名时由调用方先 move 再 updateFileName）。
+     */
+    moveFile(params: MoveFileParams): Promise<ApiResult<MoveFileResult>>;
     /** Delete remote file. */
     deleteFile(remoteFileId: string): Promise<ApiResult<void>>;
     /**

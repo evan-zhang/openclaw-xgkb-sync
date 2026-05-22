@@ -806,6 +806,8 @@ export class ManagementApi {
       syncDirection: m.syncDirection,
       filePatterns: m.filePatterns,
       excludePatterns: m.excludePatterns,
+      moveNameConflictStrategy: m.moveNameConflictStrategy,
+      renameNameConflictStrategy: m.renameNameConflictStrategy,
     };
   }
 

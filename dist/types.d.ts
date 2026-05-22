@@ -34,6 +34,16 @@ export interface SyncMapping {
      * 若不填，则使用全局 syncDirection。
      */
     syncDirection?: 'bidirectional' | 'push' | 'pull';
+    /**
+     * moveFile 目标位同名冲突策略：0=重命名，1=覆盖，2=抛异常，3=跳过。
+     * 默认 3（跳过）。策略 2 失败时整次未移动；策略 1 需处理 idMappings。
+     */
+    moveNameConflictStrategy?: 0 | 1 | 2 | 3;
+    /**
+     * updateFileName 同目录重名策略：0=自动重命名，1=抛异常。
+     * 默认 1。
+     */
+    renameNameConflictStrategy?: 0 | 1;
 }
 export interface SyncConfig {
     /** 知识库 Open API 根地址；省略时使用生产环境默认地址（见 constants.DEFAULT_SERVER_URL） */
@@ -111,6 +121,19 @@ export interface LocalFileEntry {
     name: string;
     mtime: number;
     size: number;
+    /**
+     * 文件系统设备号。
+     * Linux/macOS: stat.dev；Windows NTFS: Node.js 通过 GetFileInformationByHandle 派生的卷标识。
+     * 与 ino 合并为 localFileKey（`${dev}:${ino}`），用于跨路径追踪同一文件（重命名/移动检测）。
+     * 0 表示平台或文件系统不支持（FAT32、网络共享等），此时降级为路径对账。
+     */
+    dev: number;
+    /**
+     * 文件 inode 编号（Linux/macOS）或 NTFS 文件索引号（Windows）。
+     * Node.js 18+ 在 Windows NTFS 上通过 GetFileInformationByHandle 填充此字段；
+     * FAT32/网络驱动器等不支持的情况下返回 0，此时降级为路径对账。
+     */
+    ino: number;
 }
 export interface RemoteFileEntry {
     path: string;
@@ -126,6 +149,20 @@ export interface ListChangesItem {
     name?: string;
     updateTime?: number;
     parentId?: string | number | null;
+    /**
+     * 相对于 rootFileId 的完整路径（仅 listChanges 传 includePath=true 时返回）。
+     * 可用于在增量路径中直接获知文件当前位置，无需逐级 batchGetMeta 推导路径。
+     */
+    relativePath?: string;
+    /**
+     * 移动前的父目录 fileId（仅 includeMoveHint=true 且该节点发生移动时返回）。
+     * 与 previousName 结合可推断出移动前的路径，从而触发本地 rename/move 操作而非 delete+download。
+     */
+    previousParentId?: string | number | null;
+    /**
+     * 移动/重命名前的文件名（仅 includeMoveHint=true 且发生改名时返回）。
+     */
+    previousName?: string;
 }
 export interface ListChangesResponse {
     items: ListChangesItem[];
@@ -139,6 +176,12 @@ export interface ListDescendantFilesParams {
     limit?: number;
     cursor?: string;
     includePath?: boolean;
+    /**
+     * 是否在结果中包含目录节点（type=1）。
+     * 默认 false（仅返回文件）。有此字段时可一次性获取完整目录树，
+     * 省去后续 batchGetMeta 推导目录 fileId 的开销。
+     */
+    includeFolders?: boolean;
 }
 export interface ListDescendantFilesItem {
     fileId: string | number;
@@ -161,6 +204,36 @@ export interface FileMeta {
     parentId?: string | number | null;
     deleted?: boolean;
     type?: number;
+    /**
+     * 相对于请求时传入的 rootFileId 的完整路径（仅 includePath=true 时返回）。
+     * 用于 Phase 2 远端重命名/移动检测：与 DB 中的 remoteRelativePath 对比，
+     * 若不同则表明远端已改名或移动，触发对应的本地 rename/move 操作。
+     */
+    relativePath?: string;
+    /**
+     * 文件内容哈希（仅 includeContentHash=true 时返回）。
+     * 可用于精确冲突检测，避免仅凭 mtime 误判内容是否变更。
+     * 缺省时退化为纯 mtime 比较。
+     */
+    contentHash?: string | null;
+}
+/** batchGetMeta 扩展请求参数 */
+export interface BatchGetMetaParams {
+    fileIds: string[];
+    projectId?: string;
+    /**
+     * 是否返回每个文件相对于 rootFileId 的完整路径。
+     * 需同时传入 rootFileId 才有意义。
+     */
+    includePath?: boolean;
+    /**
+     * 计算 relativePath 时的根节点 fileId，省略则以空间根为基准。
+     */
+    rootFileId?: string;
+    /**
+     * 是否返回文件内容哈希。
+     */
+    includeContentHash?: boolean;
 }
 /** getLevel1Folders / getChildFiles 返回的目录/文件项（id 字段） */
 export interface FileListItem {
@@ -211,6 +284,82 @@ export interface ListChangesParams {
     since?: number;
     cursor?: string;
     limit?: number;
+    /**
+     * 是否在每条变更记录中附带文件当前路径（relativePath）。
+     * 开启后可在增量路径直接得知文件位置，无需再调 batchGetMeta 推导路径。
+     */
+    includePath?: boolean;
+    /**
+     * 是否在变更记录中附带移动前的父目录/文件名（previousParentId / previousName）。
+     * 仅 upsert 类型事件支持。开启后可在增量路径检测远端 rename/move，
+     * 触发本地对应操作而非 delete+download。
+     */
+    includeMoveHint?: boolean;
+}
+/** OpenUpdateFileNameParam — 见 kb-api-requirements-for-sync.md §4.1 */
+export interface UpdateFileNameParams {
+    fileId: string;
+    newName: string;
+    projectId?: string;
+    nameConflictStrategy?: 0 | 1;
+    rootFileId?: string;
+}
+/** updateFileName 成功响应最小契约 — 见 kb-api-requirements-for-sync.md §4.1.1 */
+export interface UpdateFileNameResult {
+    fileId: string;
+    name: string;
+    parentId?: string;
+    updateTime?: number;
+    /** 请求带 rootFileId 时 KB 应返回 */
+    relativePath?: string;
+    renamedDueToConflict?: boolean;
+}
+/** OpenMoveFileParam — 见 kb-api-requirements-for-sync.md §4.2 */
+export interface MoveFileParams {
+    fileId: string;
+    targetParentId: string;
+    newName?: string;
+    projectId?: string;
+    nameConflictStrategy?: 0 | 1 | 2 | 3;
+    rootFileId?: string;
+}
+/**
+ * moveFile 成功响应 — 同步客户端最小契约（见 kb-api-requirements-for-sync.md §4.2.1）。
+ * KB 可额外返回 details/skippedItems 等字段，同步端忽略。
+ */
+export interface MoveFileIdMapping {
+    sourceFileId: string;
+    targetFileId: string;
+}
+/** moveFile 成功响应（FileMoveResultVO 最小子集） */
+export interface MoveFileResult {
+    /** 操作后主节点有效 id（覆盖策略时可能 ≠ 请求 fileId） */
+    fileId: string | number;
+    /** 恒等于请求 fileId */
+    sourceFileId: string | number;
+    /** 是否因覆盖等发生 id 切换 */
+    idChanged: boolean;
+    /** 主节点最终名称 */
+    name: string;
+    /** 主节点最终父目录 id */
+    parentId: string | number;
+    /** 更新时间（毫秒） */
+    updateTime: number;
+    /**
+     * 相对 mapping 根（请求 rootFileId）的路径。
+     * 请求带 rootFileId 时 KB **必须**返回，否则同步端用本地 toPath 兜底。
+     */
+    relativePath?: string;
+    /**
+     * idChanged=true 时 **必须**返回，且至少含主节点一条映射。
+     * 子树节点映射 KB 可逐步补齐；未返回时同步端仅更新主节点 state。
+     */
+    idMappings?: MoveFileIdMapping[];
+    /**
+     * 策略 3 且主节点因同名冲突未移动时为 true。
+     * 为 true 时同步端不更新 SQLite / remoteMap。
+     */
+    mainSkipped?: boolean;
 }
 export interface MappingState {
     mappingId: string;
@@ -236,10 +385,63 @@ export interface FileState {
     syncStatus: 'done' | 'failed' | 'done_with_conflict';
     lastSyncAt?: number | null;
     lastError?: string | null;
+    /**
+     * 本地文件的设备号（stat.dev）。
+     * NULL = 尚未采集（旧记录升级前）；0 = 平台不支持（FAT32 等）；>0 = 有效值。
+     * 与 localIno 合称 localFileKey，用于跨路径追踪同一文件（重命名/移动检测）。
+     */
+    localDev?: number | null;
+    /**
+     * 本地文件的 inode 编号（Linux/macOS）或 NTFS 文件索引号（Windows）。
+     * NULL = 尚未采集；0 = 平台不支持；>0 = 有效值。
+     */
+    localIno?: number | null;
+    /**
+     * 文件在远端的相对路径（相对于 remoteRootFileId）。
+     * 用于 Phase 2 远端 rename/move 检测：下次 batchGetMeta includePath 返回的 relativePath
+     * 若与此值不符，则触发本地 rename/move 而非 delete+download。
+     * NULL = 尚未记录（旧记录或路径未变化）。
+     */
+    remoteRelativePath?: string | null;
 }
-export type SyncOp = 'upload-new' | 'upload-update' | 'download-new' | 'download-update' | 'delete-local' | 'delete-remote' | 'skip';
+export type SyncOp = 'upload-new' | 'upload-update' | 'download-new' | 'download-update' | 'delete-local' | 'delete-remote'
+/** 本地文件在同目录内改名 → 调用 updateFileName 同步到远端 */
+ | 'rename-remote'
+/** 本地文件移动到其他目录（可同时改名）→ 调用 moveFile 同步到远端 */
+ | 'move-remote'
+/** 远端文件在同目录内改名 → 本地 rename */
+ | 'rename-local'
+/** 远端文件移动到其他目录（可同时改名）→ 本地 rename/move */
+ | 'move-local' | 'skip';
 export interface SyncPlan {
+    /** 目标路径（rename/move 时为新路径，其他情况与原路径相同） */
     path: string;
+    /** 源路径，仅 rename/move 操作时有值 */
+    fromPath?: string;
+    /** 新文件名，仅 rename-remote 时有值 */
+    newName?: string;
+    /**
+     * move-remote 移动完成后若需改名（不同步传 moveFile.newName，先 move 再 updateFileName）。
+     */
+    renameAfterMoveName?: string;
+    /**
+     * 目标父目录的远端 fileId，仅 move-remote 操作时有值。
+     * 为空字符串表示目标父目录无法解析，执行时降级为 delete-remote + upload-new。
+     */
+    targetParentId?: string;
+    /**
+     * true 表示对远端文件夹执行一次 updateFileName / moveFile（Phase 1.2），
+     * 而非对单个文件逐条调用。
+     */
+    isDirectory?: boolean;
+    /** 目录移动/改名时的旧目录相对路径（如 `proj/old`） */
+    directoryOldPath?: string;
+    /** 目录移动/改名后的新目录相对路径（如 `proj/new`） */
+    directoryNewPath?: string;
+    /** 目录操作涵盖的 SQLite 文件记录（该目录下所有同步文件） */
+    affectedRecords?: FileState[];
+    /** 远端文件夹 fileId（取自子文件的 remoteFolderId） */
+    remoteFolderFileId?: string;
     local?: LocalFileEntry;
     remote?: RemoteFileEntry;
     record?: FileState;
@@ -255,5 +457,9 @@ export interface SyncStats {
     errors: string[];
     newSince?: number;
     fullScan?: boolean;
+    /** 本轮执行的远端重命名操作数（updateFileName） */
+    renamed?: number;
+    /** 本轮执行的远端移动操作数（moveFile） */
+    moved?: number;
 }
 //# sourceMappingURL=types.d.ts.map

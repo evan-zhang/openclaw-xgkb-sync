@@ -1,342 +1,362 @@
-# 知识库 Open API 需求说明（双向文件同步 · v2）
+# 知识库 Open API 实现说明（双向文件同步 · v2）
 
-> **读者**：知识库后端 / Open API 同事  
+> **读者**：同步客户端 / Open API / 联调测试  
 > **来源**：[openclaw-xgkb-sync](https://github.com/xgjk/openclaw-xgkb-sync) 独立同步进程  
-> **版本**：v2 — **不再使用** `updateFileProperty`；改为 **`updateFileName` + `moveFile`**
+> **版本**：v2（2026-05）— 以 **docdb `document-database` + open-api 透传** 为准  
+> **状态**：P0 / P1 / P2 **均已落地**（分支 `feature/kb-sync-api-p0` 及后续提交）
 
 ---
 
-## 1. 背景
+## 1. 背景与设计约束
 
 同步进程在**本地目录**与**知识库**之间按 mapping 规则做双向同步。本地 rename/move 若走「删旧 + 全量上传」，大目录下 API 与带宽开销不可接受。
 
-**v2 方案**：
+**v2 方案（已实现）**：
 
-- **改名**（同目录、仅 `name` 变化）→ 新接口 **`updateFileName`**
-- **移动**（换父目录；可同时换名）→ 新接口 **`moveFile`**（节点可为**文件或文件夹**）
-- **不支持批量**；每次只操作**一个**节点（文件夹会递归处理其子树，见 §3.2）
-- **`listChanges` 仍不增加 `move` 事件**（现设计限制）；远端 path 变化靠 meta 对账 + 全量校准
+| 场景 | 接口 |
+|------|------|
+| 同目录仅改名 | `POST /document-database/file/updateFileName` |
+| 换父目录（可同时换名） | `POST /document-database/file/moveFile` |
+| 单次仅一个节点 | 不支持 batch rename/move |
+| 远端 path 变化 | **无** `listChanges` 的 `move` 事件；靠 `batchGetMeta.relativePath` + 全量 `listDescendantFiles` 对账 |
+| 历史合并接口 | `updateFileProperty` **已废弃**（open-api 固定 `resultCode=400`） |
+
+**实现入口（docdb）**：
+
+| 能力 | 类 |
+|------|-----|
+| 写：改名 / 移动 | `FileSyncApiService` → `FileService.updateFileNameById` / `FileMoveService.moveFile` |
+| 读：meta / 子树 / 增量 / 路径 | `FileQueryService` |
+| 稳定错误码 | `SyncApiErrorCode` + `SyncApiExceptionHandler`（`FileController` / `FileQueryController`） |
+| move 明细 | `MoveExecutionReport` + `MoveExecutionReportHolder` |
+| move/rename 前快照 | `FileSyncMoveHintService`（Redis，供 `includeMoveHint`） |
+
+Open API 路径前缀：`https://{域名}/open-api/document-database/file/...`（`DocumentDatabaseController` Feign 透传）。
 
 ---
 
-## 2. 总览
+## 2. 实现总览
 
-| 类别 | 接口 | 优先级 |
-|------|------|--------|
-| **新增** | `updateFileName` | **P0** |
-| **新增** | `moveFile` | **P0** |
-| **修改** | `batchGetMeta` 响应字段 | **P0** |
-| **修改** | `listDescendantFiles` 响应字段 | **P0** |
-| **修改（可选）** | `listChanges` items 附加字段 | **P1** |
-| **新增（可选）** | `resolvePath` | **P2** |
-| **明确不做** | 批量 rename/move；`listChanges.move` 事件；同步侧调用 `updateFileProperty` | — |
+| 类别 | 接口 / 能力 | 优先级 | 状态 |
+|------|-------------|--------|------|
+| 新增 | `updateFileName` | P0 | ✅ |
+| 新增 | `moveFile` | P0 | ✅ |
+| 修改 | `batchGetMeta`（`type`/`suffix`/`relativePath`/`contentHash`/`etag`） | P0 + P2 | ✅ |
+| 修改 | `listDescendantFiles`（`type`、`includeFolders`） | P0 | ✅ |
+| 修改 | `listChanges`（`includePath`、`includeMoveHint`） | P1 | ✅ |
+| 新增 | `resolvePath` | P2 | ✅ |
+| 错误响应 | `Result.data.errorCode`（`SyncApiErrorVO`） | — | ✅ docdb 直连；经 open-api 时 **可能** 仅有 `resultCode`（如 `400001`） |
+| 明确不做 | batch rename/move；`listChanges.move` 事件；同步调用 `updateFileProperty` | — | — |
 
 ---
 
-## 3. P0：新增接口
+## 3. 路径语义（必读）
 
-### 3.1 `updateFileName` — 同目录改名
+### 3.1 `relativePath`（`batchGetMeta` / `listDescendantFiles` / `listChanges` / 写接口响应）
 
-**建议路径**：`POST /document-database/file/updateFileName`  
-**用途**：仅修改节点在**当前父目录下**的名称；**不**改变 `parentId`。
+- 由请求参数 **`rootFileId`（映射根）** 与节点 `fileId` 共同决定。
+- 算法：取 `fileId` 到根的路径链，定位链上 **`rootFileId` 所在层级**，将其**之后**各级 `name` 用 `/` 拼接（见 `FileQueryService.resolveRelativePath`）。
+- 示例：映射根为子树根文件夹 `10086`，文件在 `10086/AI生成/README.md` → `relativePath` 可能为 `AI生成/README.md`。
 
-#### 请求体
+### 3.2 `resolvePath` 的 `path`（与 `relativePath` 不同）
 
-| 字段 | 类型 | 必填 | 含义 |
+- `GET .../resolvePath?projectId=&rootFileId=&path=` 中 **`path` 相对 `rootFileId` 目录**，支持多段（`a/b.md`），非必须把 `batchGetMeta` 的多级 `relativePath` 原样传入。
+- 空 `path`：解析结果为 **`rootFileId` 自身**（`exists=true`）。
+- 中间段按**文件夹**（`type=1`）逐级匹配；最后一段文件/文件夹均可匹配（`typeFilter` 末段为 null）。
+- 无权限 / 不存在：`exists=false`，`fileId=null`（不抛错，便于客户端判断）。
+
+---
+
+## 4. 写接口
+
+### 4.1 `updateFileName` — 同目录改名
+
+**路径**：`POST /document-database/file/updateFileName`
+
+#### 请求体（`OpenUpdateFileNameParam`）
+
+| 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `fileId` | Long | 是 | 文件或文件夹 id |
-| `newName` | String | 是 | 新名称（含扩展名，如 `B.md`） |
-| `projectId` | Long | 建议 | 空间 id，鉴权与隔离 |
-| `nameConflictStrategy` | Integer | 否 | 同目录**重名**时的策略，见下表；**默认建议 1** |
+| `newName` | String | 是 | 新名称（含扩展名） |
+| `projectId` | Long | 建议 | 与节点 `projectId` 不一致时 `PROJECT_FILE_MISMATCH` |
+| `nameConflictStrategy` | Integer | 否 | **0**=自动重命名；**1**=失败。**省略/null 等价于 1**（`autoRename=false`） |
+| `rootFileId` | Long | 否 | 传入时在成功响应中填充 `relativePath` |
 
-#### `nameConflictStrategy`（仅 2 种，**不支持覆盖**）
+**不支持**「先删目标再改名」类覆盖（仅 0/1；非法值 → `INVALID_ARGUMENT`）。
 
-| 值 | 含义 | 示例：同目录已有 `B.md`，将 `A.md` 改为 `B.md` |
-|----|------|--------------------------------------------------|
-| **0** | 自动重命名（避让） | 改为 `B(1).md` 等，**保留**原 `B.md` |
-| **1** | **抛异常 / 失败**（默认推荐） | 操作失败，`A.md` 仍为 `A.md`，`B.md` 保留 |
+#### 4.1.1 成功响应 — 同步客户端**最小契约**
 
-> **不支持**「先删目标再改名」类覆盖语义。
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `fileId` | 是 | 操作后 id（正常与请求相同） |
+| `name` | 是 | **最终**名称（策略 0 可能带后缀） |
+| `parentId` | 是 | 父目录 id |
+| `updateTime` | 是 | 毫秒时间戳 |
+| `relativePath` | 请求带 `rootFileId` 时 | 相对映射根路径 |
+| `renamedDueToConflict` | 否 | `true` 表示因策略 0 自动加了后缀 |
 
-#### 响应 `data`（成功时）
+不要求：`type`（同步端忽略）。
 
-| 字段 | 类型 | 必填 | 含义 |
-|------|------|------|------|
-| `fileId` | Long | 是 | 操作后节点 id（**正常情况与请求相同**） |
-| `type` | Integer | 是 | `1` 文件夹，`2` 文件 |
-| `name` | String | 是 | **最终**名称（策略 0 时可能带后缀） |
-| `parentId` | Long | 是 | 父目录 id（与操作前相同） |
-| `updateTime` | Long | 是 | 服务端更新时间（毫秒） |
-
-#### 可选响应字段
-
-| 字段 | 没有会怎样 | 有了有什么好处 |
-|------|------------|----------------|
-| `relativePath` | 同步需再调 `batchGetMeta` 更新 path | 一次调用后可直接写状态库 |
-| `renamedDueToConflict` | 无法区分用户意图名与最终名 | `true` 表示因策略 0 自动加了后缀 |
-
-#### 错误响应（策略 1 冲突等）
-
-建议返回稳定 `errorCode`，如 `TARGET_NAME_CONFLICT`。
-
-#### 同步进程默认策略
-
-| 参数 | 默认值 | 原因 |
-|------|--------|------|
-| `nameConflictStrategy` | **1（抛异常）** | 避免远端 path 与本地 path  silently 不一致 |
+成功后写入 **move hint**（供 `includeMoveHint`）。
 
 ---
 
-### 3.2 `moveFile` — 移动节点（文件或文件夹）
+### 4.2 `moveFile` — 移动节点
 
-**建议路径**：`POST /document-database/file/moveFile`  
-**用途**：将节点移动到 `targetParentId` 下；可选指定目标名称 `newName`（省略则**保留原名**）。
+**路径**：`POST /document-database/file/moveFile`
 
-- **仅支持单个节点一次调用**（不支持 batch）。
-- `fileId` 可为**文件**或**文件夹**。
-- 移动**文件夹**时：子树内所有文件、子文件夹**一并移动**；对子树中**每个节点**在目标位置的同名冲突，均按同一 `nameConflictStrategy` **逐个处理**（见 §3.2.3）。
+#### 请求体（`OpenMoveFileParam`）
 
-#### 请求体
-
-| 字段 | 类型 | 必填 | 含义 |
+| 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `fileId` | Long | 是 | 被移动的节点 id（文件或文件夹） |
+| `fileId` | Long | 是 | 被移动节点（文件或文件夹） |
 | `targetParentId` | Long | 是 | 目标父目录 id |
-| `newName` | String | 否 | 移动后的名称；省略表示沿用原 `name` |
-| `projectId` | Long | 建议 | 空间 id |
-| `nameConflictStrategy` | Integer | 否 | 目标位置**同名冲突**策略，见下表；**同步默认 2** |
+| `newName` | String | 否 | 移动**完成后**再改名；省略保留原名 |
+| `projectId` | Long | 否 | 跨空间移动时传入 |
+| `nameConflictStrategy` | Integer | 否 | **0** 重命名 / **1** 覆盖 / **2** 抛错 / **3** 跳过。**省略/null 默认为 2** |
+| `rootFileId` | Long | 否 | 用于填充响应 `relativePath`（相对映射根） |
 
-#### `nameConflictStrategy`（4 种）
+#### `nameConflictStrategy` 与内核（`MoveConflictStrategy`）
 
-| 值 | 名称 | 行为说明 |
+| 值 | 枚举 | 行为摘要 |
 |----|------|----------|
-| **0** | 重命名 | 对**当前冲突节点**自动避让命名（如加 `(1)` 后缀），**保留**目标位已有同名节点 |
-| **1** | **覆盖** | 见 §3.2.2 **特殊语义**（**fileId 会变**） |
-| **2** | 抛异常 | 遇冲突**整次操作失败**（或该冲突节点失败，见 §3.2.3） |
-| **3** | 跳过 | 该冲突节点**不移动**，其余照常；需在响应中列出 skipped |
+| 0 | `RENAME` | 目标位同名则自动避让后缀后移动，`fileId` 通常不变 |
+| 1 | `COVER` | 目标位同名则保留**目标 id**，合并源内容后删除源节点 → **`idChanged=true`** |
+| 2 | `ERROR` | 遇同名冲突抛错（**同步推荐默认**） |
+| 3 | `SKIP` | 主节点冲突时 `mainSkipped=true`；子树其余按内核逻辑，子项跳过靠下轮对账 |
 
-#### 3.2.1 策略 0 / 2 / 3（fileId 通常不变）
+非法值（非 0–3）→ `INVALID_ARGUMENT`。
 
-- **0**：移动后节点 id **不变**；最终 `name` 可能带后缀。
-- **2**：发生冲突则失败，源节点保持原位。
-- **3**：冲突项跳过，不移动；同步需根据 `skippedItems` 对账。
+#### 4.2.1 成功响应 — 同步客户端**最小契约**（`FileMoveResultVO` 子集）
 
-#### 3.2.2 策略 1「覆盖」— 必须写清的语义 ⚠️
+> **说明**：下列字段为 **openclaw-xgkb-sync 唯一依赖** 的返回结构。`details`、`skippedItems`、`affectedCount`、`type` 等扩展字段 KB 可自行保留，**同步端不解析**。
 
-当目标目录已存在**同名节点**（文件或文件夹）时：
+**始终必填（`resultCode=1` 且主节点已处理时）**
 
-1. **保留目标位已有节点的 `fileId`**（称为 **保留 id**）；
-2. 将被移动节点的**内容**合并为保留 id 的**新版本**（文件：新版本；文件夹：按 KB 版本模型定义）；
-3. **删除被移动的源节点**（源 `fileId` 失效）；
-4. 调用方若持有源 `fileId`，必须改用**保留 id** → **`fileId` 发生变化**。
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `fileId` | Long | 操作后**主节点**有效 id |
+| `sourceFileId` | Long | **恒等于**请求 `fileId` |
+| `idChanged` | Boolean | 是否因覆盖等发生 id 切换；无冲突/重命名/跳过时为 `false` |
+| `name` | String | 主节点最终名称 |
+| `parentId` | Long | 主节点最终父 id（通常 = `targetParentId`） |
+| `updateTime` | Long | 毫秒时间戳 |
 
-**文件示例**
+**条件必填**
 
+| 字段 | 条件 | 说明 |
+|------|------|------|
+| `relativePath` | 请求带 `rootFileId` | 相对映射根的路径；无则同步端用本地路径兜底 |
+| `idMappings` | `idChanged=true` | 至少 1 条 `{ sourceFileId, targetFileId }`，**必须含主节点**（源 id → 有效 id） |
+| `mainSkipped` | 策略 3 且**主节点**因同名未移动 | `true`；同步端不更新 state。子项跳过可不单独上报，靠下轮全量对账 |
+
+**JSON 示例**
+
+```json
+// 无冲突，正常移动
+{
+  "fileId": 200,
+  "sourceFileId": 100,
+  "idChanged": false,
+  "name": "note.md",
+  "parentId": 50,
+  "updateTime": 1716000000000,
+  "relativePath": "subdir/note.md"
+}
+
+// 策略 1 覆盖，id 切换
+{
+  "fileId": 200,
+  "sourceFileId": 100,
+  "idChanged": true,
+  "name": "note.md",
+  "parentId": 50,
+  "updateTime": 1716000000000,
+  "relativePath": "subdir/note.md",
+  "idMappings": [{ "sourceFileId": 100, "targetFileId": 200 }]
+}
+
+// 策略 3，主节点跳过
+{
+  "fileId": 100,
+  "sourceFileId": 100,
+  "idChanged": false,
+  "name": "note.md",
+  "parentId": 10,
+  "updateTime": 1715990000000,
+  "mainSkipped": true
+}
 ```
-目标目录已有 B.md (id=200)
-移动 A.md (id=100) 到该目录，同名冲突，策略=1
 
-结果：
-  - id=200 的 B.md 存在，内容/version 来自原 A.md 的合并结果
-  - id=100 已删除
-  - 同步状态库须：local_path 仍对应本地 A 的路径，remote_file_id 从 100 改为 200
-```
+**同步端行为摘要**
 
-> **同步进程默认不使用策略 1**，除非产品明确配置；因 state 库 `remote_file_id` 必须重写。
-
-**文件夹示例**
-
-目标目录已有同名文件夹 `old/`(id=F2)，移动源文件夹 `src/`(id=F1)，策略=1：
-
-- 保留 **F2**；
-- 将 F1 子树内容按覆盖规则合并进 F2（具体合并规则请 KB 文档定义：同名子文件是否也走覆盖等）；
-- 删除 **F1**；
-- 文件夹 id 从 F1 → 以 F2 为准。
-
-#### 3.2.3 移动文件夹时的递归与冲突
-
-当 `fileId` 为**文件夹**时：
-
-1. 先处理**该文件夹自身**在 `targetParentId` 下的同名冲突（按 `nameConflictStrategy`）；
-2. 再对子树内**每个**文件、子文件夹，在其**各自目标路径**上按**相同** `nameConflictStrategy` **逐个**处理冲突；
-3. **不支持**一次 batch 传多个 id；递归由**服务端在一次 `moveFile` 调用内**完成。
-
-请 KB 明确：
-
-| 问题 | 需约定 |
+| 场景 | 同步端 |
 |------|--------|
-| 子项冲突时，父文件夹是否整体回滚？ | 建议：**部分成功**时返回明细（`results`/`skippedItems`/`failedItems`），或声明「全有或全无」 |
-| 策略 2 遇第一个冲突 | 整棵子树是否全部不移动？ |
-| 策略 3 跳过子项 | 跳过项是否仍留在源路径？ |
+| `mainSkipped=true` | 记日志，**不**改 SQLite |
+| `idChanged=false` | 更新 path/mtime；`remote_file_id` 不变 |
+| `idChanged=true` | 按 `idMappings` 批量改 `remote_file_id`（无 `idMappings` 时用 `sourceFileId→fileId` 兜底） |
+| 策略 2 冲突 | `resultCode≠1`，整次未移动 |
 
-#### 响应 `data`（成功时，建议结构）
+**不要求实现（可删或延后）**：`details[]`、`skippedItems[]`、`affectedCount`、`idMappings[].relativePath`。
 
-| 字段 | 类型 | 必填 | 含义 |
-|------|------|------|------|
-| `fileId` | Long | 是 | **操作后主节点**的有效 id（策略 1 可能 ≠ 请求中的 `fileId`） |
-| `sourceFileId` | Long | 建议 | 请求传入的源 id；若与 `fileId` 不同则发生过覆盖 |
-| `idChanged` | Boolean | 是 | 是否因覆盖等导致 id 切换 |
-| `type` | Integer | 是 | `1` 文件夹 / `2` 文件 |
-| `name` | String | 是 | 最终名称 |
-| `parentId` | Long | 是 | 最终父 id |
-| `updateTime` | Long | 是 | 更新时间 |
+**流程（KB 内部）**：`FileMoveService.moveFile` 递归子树 → 写 move hint → 按上表组装最小 VO。同步端**不传** `newName`；换目录+改名由客户端先 `moveFile` 再 `updateFileName`。
 
-#### 可选响应字段
+---
 
-| 字段 | 类型 | 没有会怎样 | 有了有什么好处 |
-|------|------|------------|----------------|
-| `relativePath` | String | 需额外 meta 查询 | 直接更新状态库 path |
-| `affectedCount` | Integer | 仅影响日志 | 文件夹移动影响节点数 |
-| `details` | Array | 文件夹移动失败难以定位 | 子树逐节点结果，见下表 |
-| `skippedItems` | Array | 策略 3 时同步不知哪些未动 | `{ fileId, name, reason }` |
-| `idMappings` | Array | 策略 1 时同步难批量改 state | `[{ sourceFileId, targetFileId, relativePath }]` **强烈建议** |
+## 5. 读接口（同步相关）
 
-**`details[]` 建议元素**（文件夹移动或部分成功时）
+### 5.1 `batchGetMeta`
 
-| 字段 | 含义 |
+`POST /document-database/file/batchGetMeta`（`BatchGetMetaParam`）
+
+| 请求字段 | 说明 |
+|----------|------|
+| `fileIds` | 必填，按请求顺序返回 |
+| `projectId` | 可选 |
+| `includePath` | 默认 false；**true 时 `rootFileId` 必填** |
+| `includeContentHash` | 默认 false；从 `Resource.hash` / `md5` 填充 `contentHash`、`etag` |
+
+| 响应字段 | 说明 |
+|----------|------|
+| `type` / `suffix` | 节点存在且未标记 deleted 时返回 |
+| `relativePath` | `includePath=true` 且未 deleted |
+| `deleted` | `true`：不存在 / `status≠1` / **无读权限** |
+| `contentHash` / `etag` | 无物理 `resourceId` 时可能为空（如 `uploadContent` 纯文本） |
+
+---
+
+### 5.2 `listDescendantFiles`
+
+`GET .../listDescendantFiles`
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `projectId` / `rootFileId` | 必填 | |
+| `suffix` | `md` | |
+| `limit` | 500，最大 2000 | |
+| `includePath` | false | true 时返回 `relativePath` |
+| `includeFolders` | **false** | false：仅文件（与现网一致）；true：含文件夹，项带 **`type`** |
+
+响应 `files[]`：`fileId`、`parentId`、`name`、`type`、`size`、`updateTime`、`relativePath?`。
+
+---
+
+### 5.3 `listChanges`
+
+`GET .../listChanges`
+
+| 参数 | 说明 |
 |------|------|
-| `sourceFileId` | 移动前 id |
-| `fileId` | 移动后有效 id |
-| `idChanged` | 是否覆盖换 id |
-| `relativePath` | 最终逻辑路径 |
-| `status` | `ok` / `skipped` / `failed` |
-| `errorCode` | 失败或跳过原因 |
+| `projectId` | 可省略 → 默认**个人知识库**（需 `employeeId`，`corpId` 可反查） |
+| `rootFileId` | 可选，限定子树 |
+| `since` | 毫秒水位；**有 `cursor` 时忽略 since** |
+| `cursor` | Base64 URL：`updateTimeMillis,fileId` |
+| `limit` | 默认 200，最大 1000 |
+| `includePath` | true 时 **`rootFileId` 必填**，upsert 项带 `relativePath` |
+| `includeMoveHint` | true 时 upsert 项可带 `previousParentId`、`previousName`（见 §5.4） |
 
-#### 错误与禁止
+`items[]`：`fileId`、`parentId`、`type`、`name`、`updateTime`、`event`（`upsert` | `delete`）。**无 `move` 事件类型。**
 
-| 场景 | 期望 |
+响应含 `serverTime`（毫秒）、`nextCursor`。
+
+---
+
+### 5.4 `includeMoveHint`（最佳努力）
+
+- 在 **`updateFileName` / `moveFile` 成功** 后，由 `FileSyncMoveHintService` 写入 Redis：`kb-sync:move-hint:{fileId}`，TTL **30 天**。
+- `listChanges` 拉取 upsert 时读取；Redis 不可用或未经过同步写接口时字段为空。
+- **不能**替代 `batchGetMeta` 路径对账；仅辅助判断「是否刚发生 rename/move」。
+
+---
+
+### 5.5 `resolvePath`（P2）
+
+`GET .../resolvePath?projectId=&rootFileId=&path=`
+
+响应 `ResolvePathVO`：`exists`、`fileId`、`type`、`path`（回显）。详见 §3.2。
+
+---
+
+## 6. 稳定错误码
+
+失败时 docdb 返回 `resultCode`（非 1）+ `data: { errorCode, message }`（`SyncApiExceptionHandler`）。
+
+| errorCode | resultCode | 典型场景 |
+|-----------|------------|----------|
+| `TARGET_NAME_CONFLICT` | 400001 | 同名冲突（策略 1/2） |
+| `CYCLE_MOVE_FORBIDDEN` | 400002 | 移动到自身或子孙目录 |
+| `FILE_NOT_FOUND` | 400003 | 节点不存在 |
+| `PROJECT_FILE_MISMATCH` | 400004 | `fileId` 与 `projectId` 不匹配 |
+| `INVALID_ARGUMENT` | 400005 | 非法 `nameConflictStrategy` 等 |
+| `INSUFFICIENT_PERMISSION` | 400006 | 无 ADMIN/UPLOAD 等权限 |
+| `MOVE_FAILED` | 400007 | 其它移动/改名失败（含未映射的内核异常） |
+| `MOVE_RESULT_UNRESOLVED` | 400008 | 覆盖移动后无法解析有效节点 |
+
+`SyncApiExceptionTranslator` 按内核 `BusinessException` 文案关键字映射（含「已存在」「无法移动到下层」等）。
+
+**open-api 联调注意**：网关层失败时 `data.errorCode` 有时为空，可仅用 `resultCode=400001` 判断冲突。
+
+---
+
+## 7. 废弃：`updateFileProperty`
+
+| 层级 | 行为 |
 |------|------|
-| 移动到自身子孙目录内 | 错误，如 `CYCLE_MOVE_FORBIDDEN` |
-| 策略 2 同名冲突 | `TARGET_NAME_CONFLICT` |
-| 源节点不存在 / 无权限 | 明确 `errorCode` |
+| **open-api** | `POST .../updateFileProperty` → `resultCode=400`，文案指引改用 `updateFileName` + `moveFile` |
+| **docdb 内部** | `PropertyController.updateFileProperty` 仍存在（非 Open API 同步路径） |
 
-#### 同步进程默认策略
-
-| 参数 | 默认值 | 原因 |
-|------|--------|------|
-| `nameConflictStrategy` | **2（抛异常）** | 避免静默改 id、改 path；冲突交人工或对账 |
-
-配置允许时可改为 **0**（自动重命名）；**1（覆盖）** 仅在有 `idMappings` 返回且同步实现 id 重写后启用。
+同步客户端应：**先 `moveFile`，再 `updateFileName`**（若需同时换目录与改名）。
 
 ---
 
-## 4. P0：修改现有接口
-
-### 4.1 `batchGetMeta`
-
-现网：`POST /document-database/file/batchGetMeta`  
-已有：`fileId`, `parentId`, `name`, `updateTime`, `size`, `deleted`
-
-#### 必须新增字段
-
-| 字段 | 类型 | 没有会怎样 | 有了有什么好处 |
-|------|------|------------|----------------|
-| **`type`** | Integer | 无法区分文件/文件夹 | rename/move/prune 正确 |
-| **`suffix`** | String | upload 参数需猜测 | 与 `uploadContent` 一致 |
-| **`relativePath`** | String | **无法推断远端 move**（无 listChanges.move） | 与本地 path 对比的核心字段 |
-
-> `relativePath` 规则须与 `listDescendantFiles`（`includePath=true`）**一致**。
-
-#### 可选
-
-| 字段/参数 | 没有会怎样 | 有了有什么好处 |
-|-----------|------------|----------------|
-| 请求 `includePath` | 默认不算 path | 按需算 path |
-| `contentHash` / `etag` | 无 inode 时配对 rename 易误判 | 网络盘场景兜底（P2） |
-
----
-
-### 4.2 `listDescendantFiles`
-
-#### 必须新增
-
-| 字段 | 没有会怎样 | 有了有什么好处 |
-|------|------------|----------------|
-| **`type`** | 全量对账缺文件夹信息 | 与 batchGetMeta 对齐 |
-
-#### 行为约定
-
-- `includePath=true` 时 `relativePath` **稳定必填**。
-
----
-
-## 5. P1：可选增强
-
-### 5.1 扩展 `listChanges` items（不新增 event 类型）
-
-仍仅 `upsert` / `delete`。可选附加：
-
-| 字段 | 没有会怎样 | 有了有什么好处 |
-|------|------------|----------------|
-| `relativePath` | 每条 upsert 需 batchGetMeta | 省 API |
-| `previousParentId` / `previousName` | move 推断弱 | 辅助对账 |
-
-### 5.2 `resolvePath`（P2）
-
-`GET .../resolvePath?projectId=&rootFileId=&path=` → `{ fileId, type, exists }`  
-减少 move 前逐级 `getChildFiles`。
-
----
-
-## 6. 现网继续使用的接口
-
-| 接口 | 用途 |
-|------|------|
-| `uploadContent`（无 `updateFileId`） | 新建 |
-| `uploadContent`（有 `updateFileId`） | **同路径**更新内容 |
-| `deleteFile` | 真删除；空目录清理 |
-| `listChanges` | 增量 upsert/delete |
-| `createFolder` | mapping 根解析 |
-| `getChildFiles` 等 | 树遍历 |
-
-**同步侧不再调用**：`updateFileProperty`
-
----
-
-## 7. 同步端调用约定（联调参考）
+## 8. 同步端调用约定（联调参考）
 
 ```
-本地同目录改名（inode 不变，仅文件名变）
-  → updateFileName(fileId, newName, nameConflictStrategy=1)
-  → 更新 state.local_path
+本地同目录改名
+  → updateFileName(fileId, newName, nameConflictStrategy=1, rootFileId=映射根)
+  → 用响应 relativePath / renamedDueToConflict 更新 state
 
-本地换目录 / 目录整体移动（inode 不变，path 变）
-  → moveFile(fileId, targetParentId, newName?, nameConflictStrategy=2)
-  → 若 response.idChanged：按 idMappings 重写 state.remote_file_id
-  → 更新 state.local_path / relativePath
+本地换目录 / 目录移动
+  → moveFile(fileId, targetParentId, nameConflictStrategy=映射配置默认3, rootFileId=映射根)
+  → 响应见 §4.2.1 最小契约；idChanged 时按 idMappings 改 remote_file_id
+  → mainSkipped=true 时不更新 state；换名另调 updateFileName
 
-远端变更（listChanges upsert，无 move 事件）
-  → batchGetMeta(includePath=true)
-  → 同 fileId 且 relativePath 与 state 不同 → 本地 rename/move
+远端 listChanges upsert（无 move 事件）
+  → batchGetMeta(fileIds, includePath=true, rootFileId=映射根)
+  → 同 fileId 且 relativePath ≠ state → 本地对齐 rename/move
+
+可选：路径 → fileId
+  → resolvePath(projectId, rootFileId=直接父或 mapping 根, path=相对该根的路径)
 
 定期全量
-  → listDescendantFiles(includePath=true)
-  → 以 fileId 校准 path；处理 id 已在 KB 侧合并的情况
+  → listDescendantFiles(includeFolders=true, includePath=true)
 ```
 
 ---
 
-## 8. 决策矩阵
+## 9. 实现核对清单（docdb）
 
-| 范围 | 能力 |
-|------|------|
-| **P0 最小集** | `updateFileName` + `moveFile` + meta/path 字段；本地 rename/move **不再 delete+全量 upload** |
-| **+ idMappings** | 支持 move 策略 1（覆盖换 id）时的状态库修复 |
-| **+ listChanges 附加 path** | 增量更省 |
-| **不做 batch move** | 大目录 N 个文件需 N 次 `moveFile`（文件夹尽量 1 次 folderId）；接受 RTT 换语义清晰 |
-
-### P0 checklist
-
-- [ ] 新增 **`updateFileName`**（策略 0/1，**无覆盖**）
-- [ ] 新增 **`moveFile`**（策略 0/1/2/3；文件夹递归 + 逐子项冲突；**策略 1 写清换 id 规则**）
-- [ ] 两接口成功响应含 **`fileId/type/name/parentId/updateTime`**；move 含 **`idChanged`**；策略 1 含 **`idMappings`**
-- [ ] **`batchGetMeta`** 增加 **`type`、`suffix`、`relativePath`**
-- [ ] **`listDescendantFiles`** 增加 **`type`**
-- [ ] dev-guide 文档：**不推荐使用 `updateFileProperty` 做同步**
+- [x] `updateFileName`（策略 0/1；`renamedDueToConflict`；可选 `relativePath`）
+- [x] `moveFile`（策略 0–3；同步最小契约见 §4.2.1：`idChanged` / `idMappings` / `mainSkipped`）
+- [x] `batchGetMeta`：`type`、`suffix`、`relativePath`、`includeContentHash`
+- [x] `listDescendantFiles`：`type`、`includeFolders`
+- [x] `listChanges`：`includePath`、`includeMoveHint`（Redis hint）
+- [x] `resolvePath`
+- [x] `SyncApiErrorCode` + `SyncApiExceptionHandler`
+- [x] open-api 废弃 `updateFileProperty` 桩
+- [ ] 消费方 **openclaw-xgkb-sync** 切 v2 接口（仓库外协同）
 
 ---
 
-## 9. 相关文档
+## 10. 相关文档与测试
 
-- 本地变更场景（当前实现）：[local-change-scenarios.md](./local-change-scenarios.md)
-- 同步仓库：`xgjk/openclaw-xgkb-sync`
+| 文档 / 资产 | 路径 |
+|-------------|------|
+| 对外接口明细 | `dev-guide/.../API接口明细_v2/01-空间与目录树管理.md` |
+| 全量联调脚本 | `devmanage/apitest/test-kb-api/test_kb_api_v2_all.py` |
+| CMS 示例脚本 | `skill/cms-docdb`：`update-file-name.py`、`move-file.py` |
+| 本地变更场景 | [local-change-scenarios.md](./local-change-scenarios.md) |
+| 同步仓库 | `xgjk/openclaw-xgkb-sync` |
+
+**代码锚点**：`apps/backend/document-database/src/main/java/com/xgjktech/document/service/FileSyncApiService.java`、`FileQueryService.java`（`batchGetMeta` / `listChanges` / `listDescendantFiles` / `resolvePath`）、`sync/SyncApiErrorCode.java`。

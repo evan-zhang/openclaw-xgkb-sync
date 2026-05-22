@@ -1,6 +1,6 @@
 # 本地文件变更的三种场景：同步处理逻辑
 
-以下基于当前 `github-openclaw-xgkb-sync` 源码（`syncEngine.ts`、`localFs.ts`、`remoteFs.ts`、`kbApi.ts`）整理。**前提：同步以「本地路径」为唯一身份键，不识别 rename/move 事件。**
+以下基于当前 `github-openclaw-xgkb-sync` 源码整理。**v2（Phase 1 已落地）**：在路径对账之前增加 **inode 对账**（`reconcileEngine.ts`），本地同卷 rename/move 优先走 `updateFileName` / `moveFile`，不再默认 delete+upload。
 
 ---
 
@@ -10,9 +10,10 @@
 
 每轮同步**不监听**文件系统事件，而是：
 
-1. **`localFs.listFiles()`** — 递归 walk `localRoot`，按 `filePatterns` / `excludePatterns` 过滤，对每个文件 `stat()` 取 `mtimeMs`
-2. **`syncStateDb.getAllFileStates()`** — 从 SQLite 读出上次同步记录，键为 **`local_path`**
-3. **对比得出三类本地变化**：
+1. **`localFs.listFiles()`** — 递归 walk，对每个文件 `stat()` 取 `mtimeMs`、`dev`、`ino`
+2. **`syncStateDb.getAllFileStates()`** — SQLite 记录含 `local_dev` / `local_ino` / `remote_relative_path`
+3. **Phase 1 — inode 对账**（`detectLocalRenames`）：`dev:ino` 不变且 path 变 → `rename-remote` 或 `move-remote`；同目录下全部文件一起变 → **一次** `moveFile(文件夹Id)`
+4. **Phase 2 — 路径对账**：对其余路径对比，得出三类变化：
 
 | 变化类型 | 判定条件 |
 |----------|----------|
@@ -42,7 +43,7 @@
   → 远端空目录清理（pruneRemoteEmptyDirectories）
 ```
 
-**关键设计：没有 rename API。** 设计文档明确写「先按 **delete + create** 语义处理」。重命名、移动在系统眼里 = **旧路径删远端 + 新路径新建远端**。
+**Phase 1 之后**：同卷 rename/move **不再**走 delete+upload。无法 inode 配对（`ino=0`、跨卷复制等）时仍退化为路径对账 → delete+upload。
 
 ### 1.4 知识库 API 路径前缀
 
@@ -56,67 +57,60 @@
 
 ## 二、场景 1：本地文件或文件夹改了名字
 
-### 2.1 本质
+### 2.1 本质（v2）
 
-- **文件重命名**：`notes/a.md` → `notes/b.md`
-- **文件夹重命名**：`folderA/x.md` → `folderB/x.md`（其下每个同步文件各走一遍）
+| 操作 | 识别方式 | 同步行为 |
+|------|----------|----------|
+| **单文件同目录改名** | 同一 `dev:ino`，父目录不变 | `POST updateFileName`（`rename-remote`） |
+| **文件夹改名** | 目录下**全部**同步文件 `oldDir/*` → `newDir/*`，inode 一一对应 | **一次** `POST moveFile(文件夹fileId)` + 可选 `updateFileName` 改文件夹名（`collapseDirectoryPlans`） |
+| **无法 inode 配对** | `ino=0` 或歧义 | 仍退化为路径对账 → `deleteFile` + `uploadContent` |
 
-系统**不会**把这两种操作识别为「同一 fileId 换路径」，而是两个独立路径各自决策。
+### 2.2 单文件改名示例：`notes/a.md` → `notes/b.md`
 
-### 2.2 典型决策（假设 `syncDirection = bidirectional` 或 `push`）
-
-以 `notes/a.md` → `notes/b.md`、内容未改、mtime 未变为例：
-
-| 路径 | 本地 | 远端 | SQLite | 决策 | 原因 |
-|------|------|------|--------|------|------|
-| `notes/a.md` | ✗ | ✓ | ✓ | **`delete-remote`** | 本地消失；远端 mtime 相对 record 未变 |
-| `notes/b.md` | ✓ | ✗ | ✗ | **`upload-new`** | 新路径，无历史 record |
-
-`decide()` 核心逻辑：
-
-```491:502:d:\code\plugins\github-openclaw-xgkb-sync\src\syncEngine.ts
-    // 本地缺失，远端存在
-    if (!local && remote) {
-      if (dir === 'push') return 'skip';
-      const remoteChanged = remote.mtime > (record.remoteMtime ?? 0) + MTIME_TOLERANCE_MS;
-      return remoteChanged ? 'download-update' : 'delete-remote';
-    }
-
-    // 本地存在，远端缺失
-    if (local && !remote) {
-      if (dir === 'pull') return 'skip';
-      const localChanged = local.mtime > (record.localMtime ?? 0) + MTIME_TOLERANCE_MS;
-      return localChanged ? 'upload-new' : 'delete-local';
-```
-
-重命名时旧路径走第一段（`delete-remote`），新路径走第二段且无 record 时在上层 `!record` 分支直接 **`upload-new`**。
-
-### 2.3 调用的知识库接口（按执行顺序）
-
-#### 步骤 0：扫描（每轮必做）
-
-**增量模式 — `GET listChanges`**
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `projectId` | string | mapping 所属空间 ID |
-| `rootFileId` | string? | mapping 根目录 fileId；不传则扫整个空间 |
-| `since` | number? | 上次成功水位（毫秒） |
-| `limit` | number? | 分页大小，默认 200 |
-| `cursor` | string? | 分页游标 |
-
-**增量补充 — `POST batchGetMeta`**（对 listChanges 返回的已知 fileId）
+1. inode 对账命中 → `rename-remote`
+2. **`POST updateFileName`**
 
 | 参数 | 说明 |
 |------|------|
-| `fileIds` | string[] |
-| `projectId` | string? |
+| `fileId` | `record.remoteFileId` |
+| `newName` | `b.md` |
+| `nameConflictStrategy` | mapping 配置，默认 **1**（冲突报错） |
+| `rootFileId` | mapping 根，用于响应 `relativePath` |
 
-#### 步骤 1：删旧路径 — `POST deleteFile`
+3. SQLite：`local_path` 改为 `notes/b.md`，`remote_file_id` **不变**
+
+### 2.3 文件夹改名示例：`folderA/x.md` → `folderB/x.md`（含多个 .md）
+
+1. 每个文件 inode 对账先产生 `move-remote` 计划
+2. `collapseDirectoryPlans` 合并为 **1 条目录计划**
+3. **`POST moveFile`**（仅 1 次）
 
 | 参数 | 说明 |
 |------|------|
-| `fileId` | SQLite 中 `notes/a.md` 对应的 **`record.remoteFileId`** |
+| `fileId` | 子文件 `remoteFolderId`（文件夹 `folderA` 的 id） |
+| `targetParentId` | `folderA`/`folderB` 的父目录远端 id |
+| `nameConflictStrategy` | mapping 配置，默认 **3**（跳过） |
+| `rootFileId` | mapping 根 |
+
+4. 若文件夹名也从 `folderA` 变为 `folderB`：再 **`POST updateFileName`**（`renameAfterMoveName`）
+5. 响应 `mainSkipped=true` → 不改 state，打日志
+6. 响应 `idChanged=true` → 按 `idMappings` 更新子文件 `remote_file_id`
+7. 批量更新 SQLite 中该目录下所有文件的 `local_path` 前缀
+
+### 2.4 降级路径（仍可能发生）
+
+未命中 inode 对账时，行为与旧版相同：
+
+| 路径 | 决策 |
+|------|------|
+| `notes/a.md` | `delete-remote` |
+| `notes/b.md` | `upload-new` |
+
+#### 降级 — `POST deleteFile`
+
+| 参数 | 说明 |
+|------|------|
+| `fileId` | `record.remoteFileId` |
 
 对应代码：
 
@@ -174,18 +168,28 @@
 
 ## 三、场景 2：文件从一个目录移动到另一个目录
 
-### 3.1 与场景 1 的关系
+### 3.1 v2 行为
 
-**逻辑完全相同**，只是路径前缀变化。
+例：`dir1/report.md` → `dir2/report.md`（同一 `dev:ino`）
 
-例：`dir1/report.md` → `dir2/report.md`
+| 阶段 | 行为 |
+|------|------|
+| inode 对账 | `move-remote`：`targetParentId` = 远端 `dir2` 的父文件夹 id |
+| API | `POST moveFile(fileId=record.remoteFileId, targetParentId=…)`，**不传** `newName`（仅换目录且文件名不变时） |
+| SQLite | `local_path` 更新为 `dir2/report.md`，`remote_file_id` 通常不变 |
+
+整目录 `dir1/*` → `dir2/*` 时合并为 **一次** `moveFile(文件夹Id)`（见场景 1 §2.3）。
+
+### 3.2 降级（与旧版相同）
+
+无法 inode 配对时：
 
 | 路径 | 决策 |
 |------|------|
 | `dir1/report.md` | `delete-remote` |
 | `dir2/report.md` | `upload-new` |
 
-### 3.2 新建文件时 `folderName` 的计算
+### 3.3 降级时新建文件 `folderName` 的计算
 
 `relativePath = "dir2/report.md"` 时：
 

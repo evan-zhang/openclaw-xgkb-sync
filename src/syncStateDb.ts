@@ -29,16 +29,19 @@ export class SyncStateDb {
       );
 
       CREATE TABLE IF NOT EXISTS sync_file_state (
-        mapping_id        TEXT    NOT NULL,
-        local_path        TEXT    NOT NULL,
-        remote_file_id    TEXT,
-        remote_folder_id  TEXT,
-        local_mtime       INTEGER,
-        remote_mtime      INTEGER,
-        content_hash      TEXT,
-        sync_status       TEXT    NOT NULL DEFAULT 'done',
-        last_sync_at      INTEGER,
-        last_error        TEXT,
+        mapping_id            TEXT    NOT NULL,
+        local_path            TEXT    NOT NULL,
+        remote_file_id        TEXT,
+        remote_folder_id      TEXT,
+        local_mtime           INTEGER,
+        remote_mtime          INTEGER,
+        content_hash          TEXT,
+        sync_status           TEXT    NOT NULL DEFAULT 'done',
+        last_sync_at          INTEGER,
+        last_error            TEXT,
+        local_dev             INTEGER,
+        local_ino             INTEGER,
+        remote_relative_path  TEXT,
         PRIMARY KEY (mapping_id, local_path)
       );
 
@@ -63,6 +66,10 @@ export class SyncStateDb {
       'ALTER TABLE sync_mapping_state ADD COLUMN resolved_project_id TEXT',
       'ALTER TABLE sync_mapping_state ADD COLUMN last_stats_json TEXT',
       'ALTER TABLE sync_mapping_state ADD COLUMN last_full_scan_at INTEGER',
+      // Phase 0 迁移：inode 追踪与远端路径记录
+      'ALTER TABLE sync_file_state ADD COLUMN local_dev INTEGER',
+      'ALTER TABLE sync_file_state ADD COLUMN local_ino INTEGER',
+      'ALTER TABLE sync_file_state ADD COLUMN remote_relative_path TEXT',
     ];
     for (const sql of migrations) {
       try {
@@ -71,6 +78,14 @@ export class SyncStateDb {
         // 列已存在，忽略
       }
     }
+
+    // 依赖新增列（local_dev/local_ino）的索引必须在迁移后创建，
+    // 否则旧库（缺列）会在 initSchema 阶段直接报 "no such column"。
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sync_file_local_key
+        ON sync_file_state (mapping_id, local_dev, local_ino)
+        WHERE local_dev IS NOT NULL AND local_ino IS NOT NULL AND local_ino != 0;
+    `);
   }
 
   // ==================== mapping 状态 ====================
@@ -190,8 +205,9 @@ export class SyncStateDb {
     this.db.run(
       `INSERT OR REPLACE INTO sync_file_state
          (mapping_id, local_path, remote_file_id, remote_folder_id,
-          local_mtime, remote_mtime, content_hash, sync_status, last_sync_at, last_error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          local_mtime, remote_mtime, content_hash, sync_status, last_sync_at, last_error,
+          local_dev, local_ino, remote_relative_path)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         state.mappingId,
         state.localPath,
@@ -203,8 +219,48 @@ export class SyncStateDb {
         state.syncStatus,
         state.lastSyncAt ?? null,
         state.lastError ?? null,
+        state.localDev ?? null,
+        state.localIno ?? null,
+        state.remoteRelativePath ?? null,
       ],
     );
+  }
+
+  /**
+   * 通过 inode 标识查找文件状态。
+   * dev=0 或 ino=0 时直接返回 undefined（平台不支持，退化为路径查找）。
+   */
+  getFileStateByLocalKey(mappingId: string, dev: number, ino: number): FileState | undefined {
+    if (dev === 0 || ino === 0) return undefined;
+    const rows = this.db.all(
+      'SELECT * FROM sync_file_state WHERE mapping_id = ? AND local_dev = ? AND local_ino = ?',
+      [mappingId, dev, ino],
+    ) as unknown as RawFileState[];
+    return rows.length > 0 ? rowToFileState(rows[0]) : undefined;
+  }
+
+  /**
+   * 批量更新因 moveFile(cover) 导致的远端 fileId 变更。
+   * 适用于移动目录时子节点 fileId 随覆盖策略发生变更的场景。
+   */
+  applyRemoteIdMappings(
+    mappingId: string,
+    mappings: Array<{ sourceFileId: string; targetFileId: string }>,
+  ): void {
+    if (mappings.length === 0) return;
+    this.db.exec('BEGIN');
+    try {
+      for (const { sourceFileId, targetFileId } of mappings) {
+        this.db.run(
+          'UPDATE sync_file_state SET remote_file_id = ? WHERE mapping_id = ? AND remote_file_id = ?',
+          [targetFileId, mappingId, sourceFileId],
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
 
   /**
@@ -297,6 +353,9 @@ interface RawFileState {
   sync_status: string;
   last_sync_at: number | null;
   last_error: string | null;
+  local_dev: number | null;
+  local_ino: number | null;
+  remote_relative_path: string | null;
 }
 
 function rowToMappingState(row: RawMappingState): MappingState {
@@ -334,5 +393,8 @@ function rowToFileState(row: RawFileState): FileState {
     syncStatus: row.sync_status as FileState['syncStatus'],
     lastSyncAt: row.last_sync_at,
     lastError: row.last_error,
+    localDev: row.local_dev,
+    localIno: row.local_ino,
+    remoteRelativePath: row.remote_relative_path,
   };
 }

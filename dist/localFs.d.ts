@@ -35,6 +35,12 @@ export declare class LocalFsAdapter {
     deleteFile(relativePath: string): Promise<void>;
     /** 获取文件的 mtime（毫秒），不存在返回 null */
     getMtime(relativePath: string): Promise<number | null>;
+    /**
+     * 重命名文件或目录（原子移动操作，源和目标必须在同一文件系统）。
+     * 若目标已存在则会被覆盖（平台行为）。
+     * 自动创建目标路径的父目录。
+     */
+    rename(fromRelPath: string, toRelPath: string): Promise<void>;
     /** 判断文件是否存在 */
     exists(relativePath: string): Promise<boolean>;
     /**

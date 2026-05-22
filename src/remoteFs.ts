@@ -1,6 +1,17 @@
 import micromatch from 'micromatch';
 import { KbApiClient } from './kbApi';
-import { ApiResult, FileMeta, ListChangesItem, RemoteFileEntry } from './types';
+import { normalizeMoveFileResult, warnMoveFileResponseGaps } from './kbMoveFileContract';
+import { normalizeUpdateFileNameResult } from './kbRenameFileContract';
+import {
+  ApiResult,
+  FileMeta,
+  ListChangesItem,
+  MoveFileParams,
+  MoveFileResult,
+  RemoteFileEntry,
+  UpdateFileNameParams,
+  UpdateFileNameResult,
+} from './types';
 import {
   BATCH_GET_META_MAX,
   DEFAULT_FILE_PATTERNS,
@@ -432,6 +443,44 @@ export class RemoteFsAdapter {
 
     if (!r.ok) return { ok: false, error: `Upload failed: ${r.error}` };
     return { ok: true, value: String(r.value.fileId) };
+  }
+
+  /**
+   * 重命名远端文件或文件夹（同目录内改名，不移动）。
+   * 对应 KB v2 updateFileName 接口。
+   */
+  async renameFile(params: UpdateFileNameParams): Promise<ApiResult<UpdateFileNameResult>> {
+    const rootFileId = params.rootFileId ?? this.resolvedRootFileId ?? undefined;
+    const r = await this.api.updateFileName({
+      fileId: params.fileId,
+      newName: params.newName,
+      nameConflictStrategy: params.nameConflictStrategy,
+      projectId: params.projectId ?? this.resolvedProjectId ?? undefined,
+      rootFileId,
+    });
+    if (!r.ok) return { ok: false, error: `renameFile 失败: ${r.error}` };
+    return {
+      ok: true,
+      value: normalizeUpdateFileNameResult(r.value, params.fileId),
+    };
+  }
+
+  /**
+   * 移动远端节点。同步侧不传 newName（换目录+改名时由调用方先 move 再 updateFileName）。
+   */
+  async moveFile(params: MoveFileParams): Promise<ApiResult<MoveFileResult>> {
+    const rootFileId = params.rootFileId ?? this.resolvedRootFileId ?? undefined;
+    const r = await this.api.moveFile({
+      fileId: params.fileId,
+      targetParentId: params.targetParentId,
+      nameConflictStrategy: params.nameConflictStrategy,
+      projectId: params.projectId ?? this.resolvedProjectId ?? undefined,
+      rootFileId,
+    });
+    if (!r.ok) return { ok: false, error: `moveFile 失败: ${r.error}` };
+    const value = normalizeMoveFileResult(r.value, params.fileId);
+    warnMoveFileResponseGaps(value, params.fileId, rootFileId != null, 'RemoteFs');
+    return { ok: true, value };
   }
 
   /** Delete remote file. */

@@ -35,7 +35,10 @@
       "localRoot": "/data/openclaw/tasks/output-a",
       "remoteRootFolderPath": "OpenClaw/OutputA",
       "filePatterns": ["**/*.md"],
-      "excludePatterns": ["**/_conflict_*", "**/.tmp/**"]
+      "excludePatterns": ["**/_conflict_*", "**/.tmp/**"],
+      "_comment_moveConflict": "moveNameConflictStrategy: 0=重命名 1=覆盖 2=抛异常 3=跳过(默认)；renameNameConflictStrategy: 0=自动重命名 1=抛异常(默认)",
+      "moveNameConflictStrategy": 3,
+      "renameNameConflictStrategy": 1
     },
     {
       "_comment": "完整配置：全部手动指定，启动最快（0 额外 API 调用）",

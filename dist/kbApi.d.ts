@@ -1,10 +1,11 @@
-import { ApiResult, BatchGetContentItem, CreateFolderParams, DownloadInfoVO, FileMeta, FileListItem, ListChangesParams, ListChangesResponse, ListDescendantFilesParams, ListDescendantFilesResponse, UploadContentParams, UploadContentResult } from './types';
+import { ApiResult, BatchGetContentItem, BatchGetMetaParams, CreateFolderParams, DownloadInfoVO, FileMeta, FileListItem, ListChangesParams, ListChangesResponse, ListDescendantFilesParams, ListDescendantFilesResponse, MoveFileParams, MoveFileResult, UpdateFileNameParams, UpdateFileNameResult, UploadContentParams, UploadContentResult } from './types';
 import { RateLimiter } from './rateLimiter';
 /**
  * 玄关知识库 Open API 客户端（Node.js 版）
  * 使用 Node 18+ 内置 fetch，移除 Obsidian requestUrl 依赖。
  */
 export declare class KbApiClient {
+    private static requestSeq;
     private readonly serverUrl;
     private readonly appKey;
     private readonly limiter?;
@@ -36,7 +37,13 @@ export declare class KbApiClient {
         fileId: string;
     }[]): Promise<ApiResult<BatchGetContentItem[]>>;
     /** 批量元数据（4.23） */
-    batchGetMeta(fileIds: string[], projectId?: string): Promise<ApiResult<FileMeta[]>>;
+    batchGetMeta(fileIds: string[], projectId?: string, opts?: Pick<BatchGetMetaParams, 'includePath' | 'rootFileId' | 'includeContentHash'>): Promise<ApiResult<FileMeta[]>>;
+    /**
+     * 文件/文件夹重命名（同目录内改名）。
+     * 不支持移动；需同时移动时请用 moveFile。
+     */
+    updateFileName(params: UpdateFileNameParams): Promise<ApiResult<UpdateFileNameResult>>;
+    moveFile(params: MoveFileParams): Promise<ApiResult<MoveFileResult>>;
     /**
      * 上传/更新文件（轻量高速通道）
      * - 新建：不传 updateFileId

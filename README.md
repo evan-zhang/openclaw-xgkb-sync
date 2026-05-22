@@ -103,6 +103,7 @@ curl.exe http://127.0.0.1:9090/health
 
 - **增量优先**：`listChanges` 拉取变更，仅处理有差异的文件；全量兜底保证一致性
 - **双向同步**：LWW 策略，支持 `bidirectional / push / pull` 三种方向
+- **v2 重命名/移动**：本地同卷改名或挪目录优先 `updateFileName` / `moveFile`（inode 对账）；整目录移动合并为一次 API。详见 [local-change-scenarios.md](./docs/local-change-scenarios.md)
 - **多 Mapping**：单节点可配置多条本地目录 ↔ 云端目录映射，每条独立配置方向与文件过滤
 - **按用户限速**：每个 `appKey` 独享令牌桶，多用户场景互不干扰
 - **Web 管理控制台**：浏览器访问 `/` 即可可视化增删改查 mapping 与全局配置

@@ -113,6 +113,8 @@ class LocalFsAdapter {
                         name: dirent.name,
                         mtime: stat.mtimeMs,
                         size: stat.size,
+                        dev: stat.dev,
+                        ino: stat.ino,
                     });
                 }
                 catch {
@@ -193,6 +195,17 @@ class LocalFsAdapter {
         catch {
             return null;
         }
+    }
+    /**
+     * 重命名文件或目录（原子移动操作，源和目标必须在同一文件系统）。
+     * 若目标已存在则会被覆盖（平台行为）。
+     * 自动创建目标路径的父目录。
+     */
+    async rename(fromRelPath, toRelPath) {
+        const fromAbs = this.resolve(fromRelPath);
+        const toAbs = this.resolve(toRelPath);
+        await fs.mkdir(path.dirname(toAbs), { recursive: true });
+        await fs.rename(fromAbs, toAbs);
     }
     /** 判断文件是否存在 */
     async exists(relativePath) {
