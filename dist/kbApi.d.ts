@@ -1,10 +1,11 @@
-import { ApiResult, BatchGetContentItem, CreateFolderParams, DownloadInfoVO, FileMeta, FileListItem, ListChangesParams, ListChangesResponse, ListDescendantFilesParams, ListDescendantFilesResponse, UploadContentParams, UploadContentResult } from './types';
+import { ApiResult, BatchGetContentItem, BatchGetMetaParams, CreateFolderParams, DownloadInfoVO, FileMeta, FileListItem, ListChangesParams, ListChangesResponse, ListDescendantFilesParams, ListDescendantFilesResponse, MoveFileParams, MoveFileResult, SaveFileToProjectParams, SaveResourceParams, SliceCheckResult, UpdateFileNameParams, UpdateFileNameResult, UpdateFileVersionParams, UploadContentParams, UploadContentResult, UploadFileSliceParams } from './types';
 import { RateLimiter } from './rateLimiter';
 /**
  * 玄关知识库 Open API 客户端（Node.js 版）
  * 使用 Node 18+ 内置 fetch，移除 Obsidian requestUrl 依赖。
  */
 export declare class KbApiClient {
+    private static requestSeq;
     private readonly serverUrl;
     private readonly appKey;
     private readonly limiter?;
@@ -36,13 +37,31 @@ export declare class KbApiClient {
         fileId: string;
     }[]): Promise<ApiResult<BatchGetContentItem[]>>;
     /** 批量元数据（4.23） */
-    batchGetMeta(fileIds: string[], projectId?: string): Promise<ApiResult<FileMeta[]>>;
+    batchGetMeta(fileIds: string[], projectId?: string, opts?: Pick<BatchGetMetaParams, 'includePath' | 'rootFileId' | 'includeContentHash'>): Promise<ApiResult<FileMeta[]>>;
+    /**
+     * 文件/文件夹重命名（同目录内改名）。
+     * 不支持移动；需同时移动时请用 moveFile。
+     */
+    updateFileName(params: UpdateFileNameParams): Promise<ApiResult<UpdateFileNameResult>>;
+    moveFile(params: MoveFileParams): Promise<ApiResult<MoveFileResult>>;
     /**
      * 上传/更新文件（轻量高速通道）
      * - 新建：不传 updateFileId
      * - 更新：传 updateFileId → 自动创建新版本
      */
     uploadContent(params: UploadContentParams): Promise<ApiResult<UploadContentResult>>;
+    /** 预检分片 MD5，支持秒传 */
+    getSliceIdByMd5V2(md5: string, size: number, suffix?: string): Promise<ApiResult<SliceCheckResult>>;
+    /** 注册已物理上传的分片 */
+    uploadFileSliceV2(params: UploadFileSliceParams): Promise<ApiResult<number>>;
+    /** 合并所有分片生成 resourceId */
+    saveResource(params: SaveResourceParams): Promise<ApiResult<number>>;
+    /** 通过路径保存文件到项目（自动递归创建目录），返回 fileId */
+    saveFileByPath(params: SaveFileToProjectParams): Promise<ApiResult<number>>;
+    /** 通过父目录 ID 保存文件到项目，返回 fileId */
+    saveFileByParentId(params: SaveFileToProjectParams): Promise<ApiResult<number>>;
+    /** 上传新文件内容以更新文件版本，返回 fileId */
+    updateFileVersion(params: UpdateFileVersionParams): Promise<ApiResult<number>>;
     /** 删除文件 */
     deleteFile(fileId: string): Promise<ApiResult<boolean>>;
     /** 显式创建空目录（4.24） */

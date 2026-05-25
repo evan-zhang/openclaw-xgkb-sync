@@ -1,5 +1,5 @@
 import { KbApiClient } from './kbApi';
-import { ApiResult, FileMeta, ListChangesItem, RemoteFileEntry } from './types';
+import { ApiResult, FileListItem, FileMeta, ListChangesItem, MoveFileParams, MoveFileResult, RemoteFileEntry, UpdateFileNameParams, UpdateFileNameResult } from './types';
 export interface RemoteFsOptions {
     /** Knowledge base project ID. If omitted, init() resolves the personal project ID. */
     projectId?: string;
@@ -39,6 +39,7 @@ export interface PruneEmptyDirectoriesResult {
  */
 export declare class RemoteFsAdapter {
     private readonly api;
+    private readonly uploader;
     private readonly opts;
     private readonly filePatterns;
     private readonly excludePatterns;
@@ -63,6 +64,13 @@ export declare class RemoteFsAdapter {
      */
     private resolveFileIdFromPath;
     /**
+     * 将「相对 mapping 根」的本地目录路径解析为远端 folderId。
+     * 空字符串表示 mapping 根（resolvedRootFileId）。
+     * @param createIfMissing true=路径不存在时逐级 createFolder（上传流程）；
+     *                        false=只查找不创建，找不到返回 error（enrichment 阶段使用）。
+     */
+    resolveFolderIdForLocalDir(localDirPath: string, createIfMissing?: boolean): Promise<ApiResult<string>>;
+    /**
      * Resolve a folder path from fileId for configs that only provide remoteRootFileId.
      */
     private resolvePathFromFileId;
@@ -82,7 +90,7 @@ export declare class RemoteFsAdapter {
      */
     readFilesBatch(fileIds: string[]): Promise<Map<string, string>>;
     /**
-     * Create a remote file through uploadContent without updateFileId.
+     * Create a remote file (new upload, no existing fileId).
      * @param relativePath Relative path, for example "folder/2024.md".
      */
     createFile(relativePath: string, content: string): Promise<ApiResult<{
@@ -90,11 +98,22 @@ export declare class RemoteFsAdapter {
         remoteFolderId: string;
     }>>;
     /**
-     * Update a remote file version through uploadContent + updateFileId.
+     * Update a remote file version (append new version to existing fileId).
      */
     updateFile(remoteFileId: string, fileName: string, content: string): Promise<ApiResult<string>>;
+    /**
+     * 重命名远端文件或文件夹（同目录内改名，不移动）。
+     * 对应 KB v2 updateFileName 接口。
+     */
+    renameFile(params: UpdateFileNameParams): Promise<ApiResult<UpdateFileNameResult>>;
+    /**
+     * 移动远端节点。同步侧不传 newName（换目录+改名时由调用方先 move 再 updateFileName）。
+     */
+    moveFile(params: MoveFileParams): Promise<ApiResult<MoveFileResult>>;
     /** Delete remote file. */
     deleteFile(remoteFileId: string): Promise<ApiResult<void>>;
+    /** 查询远端目录的直接子项（文件+子目录），用于安全检查目录是否为空 */
+    getChildFiles(folderId: string): Promise<ApiResult<FileListItem[]>>;
     /**
      * 后序清理远端空目录。
      * - 不删除 mapping 根目录自身；

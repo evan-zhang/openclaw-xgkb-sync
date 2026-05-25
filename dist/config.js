@@ -288,6 +288,8 @@ function validateMapping(raw, idx, filePath) {
     const mappingSyncDirection = rawDir && validDirections.includes(rawDir)
         ? rawDir
         : undefined;
+    const moveNameConflictStrategy = parseMoveConflictStrategy(m.moveNameConflictStrategy, filePath, loc);
+    const renameNameConflictStrategy = parseRenameConflictStrategy(m.renameNameConflictStrategy, filePath, loc);
     return {
         mappingId: m.mappingId,
         enabled: typeof m.enabled === 'boolean' ? m.enabled : true,
@@ -299,7 +301,27 @@ function validateMapping(raw, idx, filePath) {
         filePatterns,
         excludePatterns,
         syncDirection: mappingSyncDirection,
+        moveNameConflictStrategy,
+        renameNameConflictStrategy,
     };
+}
+function parseMoveConflictStrategy(raw, filePath, loc) {
+    if (raw === undefined || raw === null)
+        return undefined;
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    if (![0, 1, 2, 3].includes(n)) {
+        throw new Error(`${loc}.moveNameConflictStrategy 必须是 0|1|2|3: ${filePath}`);
+    }
+    return n;
+}
+function parseRenameConflictStrategy(raw, filePath, loc) {
+    if (raw === undefined || raw === null)
+        return undefined;
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    if (![0, 1].includes(n)) {
+        throw new Error(`${loc}.renameNameConflictStrategy 必须是 0|1: ${filePath}`);
+    }
+    return n;
 }
 /**
  * 为 POST /mappings 生成不与现有列表冲突的 mappingId。

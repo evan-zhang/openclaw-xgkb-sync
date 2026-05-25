@@ -28,21 +28,36 @@ class SyncStateDb {
       );
 
       CREATE TABLE IF NOT EXISTS sync_file_state (
-        mapping_id        TEXT    NOT NULL,
-        local_path        TEXT    NOT NULL,
-        remote_file_id    TEXT,
-        remote_folder_id  TEXT,
-        local_mtime       INTEGER,
-        remote_mtime      INTEGER,
-        content_hash      TEXT,
-        sync_status       TEXT    NOT NULL DEFAULT 'done',
-        last_sync_at      INTEGER,
-        last_error        TEXT,
+        mapping_id            TEXT    NOT NULL,
+        local_path            TEXT    NOT NULL,
+        remote_file_id        TEXT,
+        remote_folder_id      TEXT,
+        local_mtime           INTEGER,
+        remote_mtime          INTEGER,
+        content_hash          TEXT,
+        sync_status           TEXT    NOT NULL DEFAULT 'done',
+        last_sync_at          INTEGER,
+        last_error            TEXT,
+        local_dev             TEXT,
+        local_ino             TEXT,
+        remote_relative_path  TEXT,
         PRIMARY KEY (mapping_id, local_path)
       );
 
       CREATE INDEX IF NOT EXISTS idx_sync_file_remote_id
         ON sync_file_state (mapping_id, remote_file_id);
+
+      CREATE TABLE IF NOT EXISTS sync_folder_state (
+        mapping_id        TEXT    NOT NULL,
+        local_path        TEXT    NOT NULL,
+        remote_folder_id  TEXT    NOT NULL,
+        local_dev         TEXT,
+        local_ino         TEXT,
+        PRIMARY KEY (mapping_id, local_path)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sync_folder_remote_id
+        ON sync_folder_state (mapping_id, remote_folder_id);
 
       CREATE TABLE IF NOT EXISTS sync_op_log (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +76,10 @@ class SyncStateDb {
             'ALTER TABLE sync_mapping_state ADD COLUMN resolved_project_id TEXT',
             'ALTER TABLE sync_mapping_state ADD COLUMN last_stats_json TEXT',
             'ALTER TABLE sync_mapping_state ADD COLUMN last_full_scan_at INTEGER',
+            // Phase 0 迁移：inode 追踪与远端路径记录
+            'ALTER TABLE sync_file_state ADD COLUMN local_dev TEXT',
+            'ALTER TABLE sync_file_state ADD COLUMN local_ino TEXT',
+            'ALTER TABLE sync_file_state ADD COLUMN remote_relative_path TEXT',
         ];
         for (const sql of migrations) {
             try {
@@ -70,6 +89,26 @@ class SyncStateDb {
                 // 列已存在，忽略
             }
         }
+        // 迁移：旧版本用 Number stat 存储的 INTEGER dev/ino 有精度丢失，
+        // 新版本用 BigInt stat 存储精确的 TEXT 值。将旧 INTEGER 数据清空以触发重新采集。
+        try {
+            this.db.exec(`
+        UPDATE sync_file_state SET local_dev = NULL, local_ino = NULL
+          WHERE typeof(local_ino) = 'integer';
+        UPDATE sync_folder_state SET local_dev = NULL, local_ino = NULL
+          WHERE typeof(local_ino) = 'integer';
+      `);
+        }
+        catch {
+            // 首次建库不会有旧数据
+        }
+        // 依赖新增列（local_dev/local_ino）的索引必须在迁移后创建，
+        // 否则旧库（缺列）会在 initSchema 阶段直接报 "no such column"。
+        this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sync_file_local_key
+        ON sync_file_state (mapping_id, local_dev, local_ino)
+        WHERE local_dev IS NOT NULL AND local_ino IS NOT NULL AND local_ino != '0';
+    `);
     }
     // ==================== mapping 状态 ====================
     getMappingState(mappingId) {
@@ -123,6 +162,7 @@ class SyncStateDb {
         this.db.exec('BEGIN');
         try {
             this.db.run('DELETE FROM sync_file_state WHERE mapping_id = ?', [mappingId]);
+            this.db.run('DELETE FROM sync_folder_state WHERE mapping_id = ?', [mappingId]);
             this.db.run(`UPDATE sync_mapping_state
          SET last_sync_since       = NULL,
              last_server_time      = NULL,
@@ -156,8 +196,9 @@ class SyncStateDb {
     upsertFileState(state) {
         this.db.run(`INSERT OR REPLACE INTO sync_file_state
          (mapping_id, local_path, remote_file_id, remote_folder_id,
-          local_mtime, remote_mtime, content_hash, sync_status, last_sync_at, last_error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+          local_mtime, remote_mtime, content_hash, sync_status, last_sync_at, last_error,
+          local_dev, local_ino, remote_relative_path)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
             state.mappingId,
             state.localPath,
             state.remoteFileId ?? null,
@@ -168,7 +209,39 @@ class SyncStateDb {
             state.syncStatus,
             state.lastSyncAt ?? null,
             state.lastError ?? null,
+            state.localDev ?? null,
+            state.localIno ?? null,
+            state.remoteRelativePath ?? null,
         ]);
+    }
+    /**
+     * 通过 inode 标识查找文件状态。
+     * dev="0" 或 ino="0" 时直接返回 undefined（平台不支持，退化为路径查找）。
+     */
+    getFileStateByLocalKey(mappingId, dev, ino) {
+        if (!dev || dev === '0' || !ino || ino === '0')
+            return undefined;
+        const rows = this.db.all('SELECT * FROM sync_file_state WHERE mapping_id = ? AND local_dev = ? AND local_ino = ?', [mappingId, dev, ino]);
+        return rows.length > 0 ? rowToFileState(rows[0]) : undefined;
+    }
+    /**
+     * 批量更新因 moveFile(cover) 导致的远端 fileId 变更。
+     * 适用于移动目录时子节点 fileId 随覆盖策略发生变更的场景。
+     */
+    applyRemoteIdMappings(mappingId, mappings) {
+        if (mappings.length === 0)
+            return;
+        this.db.exec('BEGIN');
+        try {
+            for (const { sourceFileId, targetFileId } of mappings) {
+                this.db.run('UPDATE sync_file_state SET remote_file_id = ? WHERE mapping_id = ? AND remote_file_id = ?', [targetFileId, mappingId, sourceFileId]);
+            }
+            this.db.exec('COMMIT');
+        }
+        catch (e) {
+            this.db.exec('ROLLBACK');
+            throw e;
+        }
     }
     /**
      * 在单次事务中批量写入多条文件状态，比逐条写入快 10x 以上。
@@ -195,6 +268,98 @@ class SyncStateDb {
     /** 清除某 mapping 所有文件状态（用于强制全量重建） */
     clearMappingFiles(mappingId) {
         this.db.run('DELETE FROM sync_file_state WHERE mapping_id = ?', [mappingId]);
+    }
+    // ==================== 文件夹状态 ====================
+    getFolderState(mappingId, localPath) {
+        const rows = this.db.all('SELECT * FROM sync_folder_state WHERE mapping_id = ? AND local_path = ?', [mappingId, localPath]);
+        return rows.length > 0 ? rowToFolderState(rows[0]) : undefined;
+    }
+    getFolderStateByRemoteId(mappingId, remoteFolderId) {
+        const rows = this.db.all('SELECT * FROM sync_folder_state WHERE mapping_id = ? AND remote_folder_id = ?', [mappingId, remoteFolderId]);
+        return rows.length > 0 ? rowToFolderState(rows[0]) : undefined;
+    }
+    getAllFolderStates(mappingId) {
+        const rows = this.db.all('SELECT * FROM sync_folder_state WHERE mapping_id = ?', [mappingId]);
+        return rows.map(rowToFolderState);
+    }
+    getFolderStateByLocalKey(mappingId, dev, ino) {
+        if (!dev || dev === '0' || !ino || ino === '0')
+            return undefined;
+        const rows = this.db.all('SELECT * FROM sync_folder_state WHERE mapping_id = ? AND local_dev = ? AND local_ino = ?', [mappingId, dev, ino]);
+        return rows.length > 0 ? rowToFolderState(rows[0]) : undefined;
+    }
+    upsertFolderState(state) {
+        this.db.run(`INSERT OR REPLACE INTO sync_folder_state
+         (mapping_id, local_path, remote_folder_id, local_dev, local_ino)
+       VALUES (?, ?, ?, ?, ?)`, [
+            state.mappingId,
+            state.localPath,
+            state.remoteFolderId,
+            state.localDev ?? null,
+            state.localIno ?? null,
+        ]);
+    }
+    upsertFolderStateBatch(states) {
+        if (states.length === 0)
+            return;
+        this.db.exec('BEGIN');
+        try {
+            for (const state of states) {
+                this.upsertFolderState(state);
+            }
+            this.db.exec('COMMIT');
+        }
+        catch (e) {
+            this.db.exec('ROLLBACK');
+            throw e;
+        }
+    }
+    deleteFolderState(mappingId, localPath) {
+        this.db.run('DELETE FROM sync_folder_state WHERE mapping_id = ? AND local_path = ?', [mappingId, localPath]);
+    }
+    /** 批量删除路径前缀匹配的文件夹记录（目录被删除时级联清理子目录） */
+    deleteFolderStatesUnder(mappingId, dirPrefix) {
+        this.db.run('DELETE FROM sync_folder_state WHERE mapping_id = ? AND (local_path = ? OR local_path LIKE ?)', [mappingId, dirPrefix, `${dirPrefix}/%`]);
+    }
+    /** 批量更新路径前缀（目录重命名/移动后更新所有子目录路径） */
+    renameFolderPaths(mappingId, oldPrefix, newPrefix) {
+        this.db.exec('BEGIN');
+        try {
+            // 精确匹配旧路径本身
+            this.db.run(`UPDATE sync_folder_state SET local_path = ? WHERE mapping_id = ? AND local_path = ?`, [newPrefix, mappingId, oldPrefix]);
+            // 匹配旧路径的子目录
+            const rows = this.db.all(`SELECT local_path FROM sync_folder_state WHERE mapping_id = ? AND local_path LIKE ?`, [mappingId, `${oldPrefix}/%`]);
+            for (const row of rows) {
+                const newPath = newPrefix + row.local_path.slice(oldPrefix.length);
+                this.db.run(`UPDATE sync_folder_state SET local_path = ? WHERE mapping_id = ? AND local_path = ?`, [newPath, mappingId, row.local_path]);
+            }
+            this.db.exec('COMMIT');
+        }
+        catch (e) {
+            this.db.exec('ROLLBACK');
+            throw e;
+        }
+    }
+    /** 批量更新文件路径前缀（目录重命名/移动后更新所有子文件路径） */
+    renameFilePaths(mappingId, oldPrefix, newPrefix) {
+        this.db.exec('BEGIN');
+        try {
+            const rows = this.db.all(`SELECT local_path FROM sync_file_state WHERE mapping_id = ? AND (local_path = ? OR local_path LIKE ?)`, [mappingId, oldPrefix, `${oldPrefix}/%`]);
+            for (const row of rows) {
+                const newPath = row.local_path === oldPrefix
+                    ? newPrefix
+                    : newPrefix + row.local_path.slice(oldPrefix.length);
+                this.db.run(`UPDATE sync_file_state SET local_path = ?, remote_relative_path = ? WHERE mapping_id = ? AND local_path = ?`, [newPath, newPath, mappingId, row.local_path]);
+            }
+            this.db.exec('COMMIT');
+        }
+        catch (e) {
+            this.db.exec('ROLLBACK');
+            throw e;
+        }
+    }
+    clearMappingFolders(mappingId) {
+        this.db.run('DELETE FROM sync_folder_state WHERE mapping_id = ?', [mappingId]);
     }
     // ==================== 操作日志 ====================
     insertOpLog(entry) {
@@ -255,6 +420,27 @@ function rowToFileState(row) {
         syncStatus: row.sync_status,
         lastSyncAt: row.last_sync_at,
         lastError: row.last_error,
+        localDev: toInoStr(row.local_dev),
+        localIno: toInoStr(row.local_ino),
+        remoteRelativePath: row.remote_relative_path,
     };
+}
+function rowToFolderState(row) {
+    return {
+        mappingId: row.mapping_id,
+        localPath: row.local_path,
+        remoteFolderId: row.remote_folder_id,
+        localDev: toInoStr(row.local_dev),
+        localIno: toInoStr(row.local_ino),
+    };
+}
+/**
+ * 将 DB 中读出的 dev/ino 值统一转为 string | null。
+ * 兼容旧数据（INTEGER/BigInt）和新数据（TEXT）。
+ */
+function toInoStr(val) {
+    if (val == null)
+        return null;
+    return String(val);
 }
 //# sourceMappingURL=syncStateDb.js.map

@@ -2,7 +2,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import micromatch from 'micromatch';
-import { LocalFileEntry } from './types';
+import { LocalDirEntry, LocalFileEntry } from './types';
 import { DEFAULT_EXCLUDE_PATTERNS, DEFAULT_FILE_PATTERNS, mergeDefaultExcludePatterns } from './constants';
 import { canonicalizeRelativeSyncPath, normalizeSeparator, sanitizePathSegment } from './pathSanitize';
 
@@ -41,11 +41,11 @@ export class LocalFsAdapter {
   }
 
   /**
-   * 递归列出 localRoot 下所有纳入同步遍历范围的目录。
+   * 递归列出 localRoot 下所有纳入同步遍历范围的目录（含 dev/ino）。
    * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
    */
-  async listDirectories(): Promise<string[]> {
-    const dirs: string[] = [];
+  async listDirectories(): Promise<LocalDirEntry[]> {
+    const dirs: LocalDirEntry[] = [];
     await this.walkDirectories(this.localRoot, '', dirs);
     return dirs;
   }
@@ -83,12 +83,14 @@ export class LocalFsAdapter {
         if (!micromatch.isMatch(safePath, this.filePatterns)) continue;
 
         try {
-          const stat = await fs.stat(absPath);
+          const stat = await fs.stat(absPath, { bigint: true });
           entries.push({
             path: safePath,
             name: dirent.name,
-            mtime: stat.mtimeMs,
-            size: stat.size,
+            mtime: Number(stat.mtimeMs),
+            size: Number(stat.size),
+            dev: stat.dev.toString(),
+            ino: stat.ino.toString(),
           });
         } catch {
           // stat 失败跳过
@@ -119,7 +121,7 @@ export class LocalFsAdapter {
   private async walkDirectories(
     absDir: string,
     relPrefix: string,
-    dirs: string[],
+    dirs: LocalDirEntry[],
   ): Promise<void> {
     let dirEntries: fsSync.Dirent[];
     try {
@@ -140,8 +142,14 @@ export class LocalFsAdapter {
         .split('/')
         .map((seg) => sanitizePathSegment(seg))
         .join('/');
-      dirs.push(safePath);
-      subDirTasks.push(this.walkDirectories(path.join(absDir, dirent.name), relPath, dirs));
+      const absPath = path.join(absDir, dirent.name);
+      try {
+        const stat = await fs.stat(absPath, { bigint: true });
+        dirs.push({ path: safePath, dev: stat.dev.toString(), ino: stat.ino.toString() });
+      } catch {
+        dirs.push({ path: safePath, dev: '0', ino: '0' });
+      }
+      subDirTasks.push(this.walkDirectories(absPath, relPath, dirs));
     }
 
     if (subDirTasks.length > 0) {
@@ -189,6 +197,18 @@ export class LocalFsAdapter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 重命名文件或目录（原子移动操作，源和目标必须在同一文件系统）。
+   * 若目标已存在则会被覆盖（平台行为）。
+   * 自动创建目标路径的父目录。
+   */
+  async rename(fromRelPath: string, toRelPath: string): Promise<void> {
+    const fromAbs = this.resolve(fromRelPath);
+    const toAbs = this.resolve(toRelPath);
+    await fs.mkdir(path.dirname(toAbs), { recursive: true });
+    await fs.rename(fromAbs, toAbs);
   }
 
   /** 判断文件是否存在 */

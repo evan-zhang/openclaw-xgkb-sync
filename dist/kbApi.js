@@ -43,6 +43,7 @@ function summarizeParams(params) {
  * 使用 Node 18+ 内置 fetch，移除 Obsidian requestUrl 依赖。
  */
 class KbApiClient {
+    static requestSeq = 0;
     serverUrl;
     appKey;
     limiter;
@@ -55,6 +56,8 @@ class KbApiClient {
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
     async request(method, apiPath, params) {
+        const requestId = ++KbApiClient.requestSeq;
+        const reqStart = Date.now();
         const baseUrl = this.serverUrl + apiPath;
         let url = baseUrl;
         let body;
@@ -69,6 +72,8 @@ class KbApiClient {
             body = JSON.stringify(params);
         }
         const paramsSummary = summarizeParams(params);
+        console.log(`[KbApi] request#${requestId} start method=${method} path=${apiPath}\n` +
+            `  params: ${paramsSummary}`);
         let lastError = '';
         let lastErrorWasRateLimit = false;
         for (let attempt = 0; attempt < constants_1.MAX_RETRIES; attempt++) {
@@ -83,6 +88,7 @@ class KbApiClient {
             }
             lastErrorWasRateLimit = false;
             try {
+                const attemptStart = Date.now();
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), constants_1.REQUEST_TIMEOUT_MS);
                 let resp;
@@ -104,7 +110,7 @@ class KbApiClient {
                 const urlForLog = truncateForLog(url);
                 if (!resp.ok) {
                     const bodySnippet = truncateForLog(rawText, constants_1.API_ERROR_MESSAGE_BODY_MAX);
-                    console.error(`[KbApi] HTTP 错误 method=${method} path=${apiPath} status=${resp.status} ${resp.statusText} attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
+                    console.error(`[KbApi] request#${requestId} HTTP 错误 method=${method} path=${apiPath} status=${resp.status} ${resp.statusText} attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                         `  url: ${urlForLog}\n` +
                         `  params: ${paramsSummary}\n` +
                         `  responseBody: ${truncateForLog(rawText)}`);
@@ -133,7 +139,7 @@ class KbApiClient {
                     parsed = JSON.parse(rawText);
                 }
                 catch {
-                    console.error(`[KbApi] 响应非 JSON method=${method} path=${apiPath} attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
+                    console.error(`[KbApi] request#${requestId} 响应非 JSON method=${method} path=${apiPath} attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                         `  url: ${urlForLog}\n` +
                         `  params: ${paramsSummary}\n` +
                         `  raw: ${truncateForLog(rawText)}`);
@@ -150,8 +156,8 @@ class KbApiClient {
                     const shortErr = `API error ${result.resultCode}: ${result.resultMsg}` + (dataStr ? ` | data=${dataStr}` : '');
                     // 业务层限流（如 610012）：可恢复，触发限速器冷却后重试
                     if (constants_1.RATE_LIMIT_RESULT_CODES.has(result.resultCode)) {
-                        console.warn(`[KbApi] 业务层限流 code=${result.resultCode} method=${method} path=${apiPath}` +
-                            ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
+                        console.warn(`[KbApi] request#${requestId} 业务层限流 code=${result.resultCode} method=${method} path=${apiPath}` +
+                            ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                             `  url: ${urlForLog}\n` +
                             `  params: ${paramsSummary}\n` +
                             `  msg: ${result.resultMsg}`);
@@ -163,8 +169,8 @@ class KbApiClient {
                     // 业务层临时服务端错误（如 uploadContent 偶发 "文件信息查询失败"）：
                     // HTTP 是 200，但 resultCode 表示服务端短暂失败，按 5xx 语义退避重试。
                     if (constants_1.TRANSIENT_RESULT_CODES.has(result.resultCode)) {
-                        console.warn(`[KbApi] 业务层临时错误 code=${result.resultCode} method=${method} path=${apiPath}` +
-                            ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
+                        console.warn(`[KbApi] request#${requestId} 业务层临时错误 code=${result.resultCode} method=${method} path=${apiPath}` +
+                            ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                             `  url: ${urlForLog}\n` +
                             `  params: ${paramsSummary}\n` +
                             `  msg: ${result.resultMsg}`);
@@ -172,12 +178,16 @@ class KbApiClient {
                         continue;
                     }
                     // 其他业务错误：参数错误、权限不足等永久性错误，不重试
-                    console.error(`[KbApi] 业务错误 method=${method} path=${apiPath} attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
+                    console.error(`[KbApi] request#${requestId} 业务错误 method=${method} path=${apiPath} attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                         `  url: ${urlForLog}\n` +
                         `  params: ${paramsSummary}\n` +
                         `  response: ${truncateForLog(JSON.stringify(parsed))}`);
                     return { ok: false, error: shortErr };
                 }
+                const dataSummary = result.data != null ? summarizeParams({ data: result.data }) : '{}';
+                console.log(`[KbApi] request#${requestId} success method=${method} path=${apiPath}` +
+                    ` attempt=${attempt + 1}/${constants_1.MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms total=${Date.now() - reqStart}ms\n` +
+                    `  data: ${dataSummary}`);
                 return { ok: true, value: result.data };
             }
             catch (e) {
@@ -187,12 +197,12 @@ class KbApiClient {
                 else {
                     lastError = e instanceof Error ? e.message : String(e);
                 }
-                console.error(`[KbApi] 请求异常 method=${method} path=${apiPath} attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
+                console.error(`[KbApi] request#${requestId} 请求异常 method=${method} path=${apiPath} attempt=${attempt + 1}/${constants_1.MAX_RETRIES}\n` +
                     `  params: ${paramsSummary}\n` +
                     `  error: ${lastError}`);
             }
         }
-        console.error(`[KbApi] 已达最大重试 method=${method} path=${apiPath}\n` +
+        console.error(`[KbApi] request#${requestId} 已达最大重试 method=${method} path=${apiPath} total=${Date.now() - reqStart}ms\n` +
             `  params: ${paramsSummary}\n` +
             `  lastError: ${lastError}`);
         return { ok: false, error: `请求失败(重试${constants_1.MAX_RETRIES}次): ${lastError}` };
@@ -247,11 +257,44 @@ class KbApiClient {
         return this.request('POST', constants_1.API_PATHS.batchGetContent, { files });
     }
     /** 批量元数据（4.23） */
-    async batchGetMeta(fileIds, projectId) {
+    async batchGetMeta(fileIds, projectId, opts) {
         return this.request('POST', constants_1.API_PATHS.batchGetMeta, {
             fileIds,
             projectId,
+            ...(opts?.includePath !== undefined && { includePath: opts.includePath }),
+            ...(opts?.rootFileId && { rootFileId: opts.rootFileId }),
+            ...(opts?.includeContentHash !== undefined && { includeContentHash: opts.includeContentHash }),
         });
+    }
+    /**
+     * 文件/文件夹重命名（同目录内改名）。
+     * 不支持移动；需同时移动时请用 moveFile。
+     */
+    async updateFileName(params) {
+        return this.request('POST', constants_1.API_PATHS.updateFileName, {
+            fileId: params.fileId,
+            newName: params.newName,
+            ...(params.projectId !== undefined && { projectId: params.projectId }),
+            ...(params.nameConflictStrategy !== undefined && {
+                nameConflictStrategy: params.nameConflictStrategy,
+            }),
+            ...(params.rootFileId !== undefined && { rootFileId: params.rootFileId }),
+        });
+    }
+    async moveFile(params) {
+        const body = {
+            fileId: params.fileId,
+            targetParentId: params.targetParentId,
+        };
+        if (params.projectId !== undefined)
+            body.projectId = params.projectId;
+        if (params.nameConflictStrategy !== undefined) {
+            body.nameConflictStrategy = params.nameConflictStrategy;
+        }
+        if (params.rootFileId !== undefined)
+            body.rootFileId = params.rootFileId;
+        // 同步侧不传 newName；换目录+改名由 move 成功后 updateFileName 完成
+        return this.request('POST', constants_1.API_PATHS.moveFile, body);
     }
     /**
      * 上传/更新文件（轻量高速通道）
@@ -262,6 +305,35 @@ class KbApiClient {
         return this.request('POST', constants_1.API_PATHS.uploadContent, {
             ...params,
         });
+    }
+    // ==================== 分片上传 ====================
+    /** 预检分片 MD5，支持秒传 */
+    async getSliceIdByMd5V2(md5, size, suffix) {
+        const params = { md5, size };
+        if (suffix)
+            params.suffix = suffix;
+        return this.request('GET', constants_1.API_PATHS.getSliceIdByMd5V2, params);
+    }
+    /** 注册已物理上传的分片 */
+    async uploadFileSliceV2(params) {
+        return this.request('POST', constants_1.API_PATHS.uploadFileSliceV2, { ...params });
+    }
+    /** 合并所有分片生成 resourceId */
+    async saveResource(params) {
+        return this.request('POST', constants_1.API_PATHS.saveResource, { ...params });
+    }
+    // ==================== 物理文件入库 ====================
+    /** 通过路径保存文件到项目（自动递归创建目录），返回 fileId */
+    async saveFileByPath(params) {
+        return this.request('POST', constants_1.API_PATHS.saveFileByPath, { ...params });
+    }
+    /** 通过父目录 ID 保存文件到项目，返回 fileId */
+    async saveFileByParentId(params) {
+        return this.request('POST', constants_1.API_PATHS.saveFileByParentId, { ...params });
+    }
+    /** 上传新文件内容以更新文件版本，返回 fileId */
+    async updateFileVersion(params) {
+        return this.request('POST', constants_1.API_PATHS.updateFileVersion, { ...params });
     }
     /** 删除文件 */
     async deleteFile(fileId) {

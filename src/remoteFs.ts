@@ -1,6 +1,19 @@
 import micromatch from 'micromatch';
 import { KbApiClient } from './kbApi';
-import { ApiResult, FileMeta, ListChangesItem, RemoteFileEntry } from './types';
+import { FileUploader } from './fileUploader';
+import { normalizeMoveFileResult, warnMoveFileResponseGaps } from './kbMoveFileContract';
+import { normalizeUpdateFileNameResult } from './kbRenameFileContract';
+import {
+  ApiResult,
+  FileListItem,
+  FileMeta,
+  ListChangesItem,
+  MoveFileParams,
+  MoveFileResult,
+  RemoteFileEntry,
+  UpdateFileNameParams,
+  UpdateFileNameResult,
+} from './types';
 import {
   BATCH_GET_META_MAX,
   DEFAULT_FILE_PATTERNS,
@@ -56,6 +69,7 @@ interface PruneFolderResult extends PruneEmptyDirectoriesResult {
  */
 export class RemoteFsAdapter {
   private readonly api: KbApiClient;
+  private readonly uploader: FileUploader;
   private readonly opts: RemoteFsOptions;
   private readonly filePatterns: string[];
   private readonly excludePatterns: string[];
@@ -67,6 +81,7 @@ export class RemoteFsAdapter {
 
   constructor(api: KbApiClient, opts: RemoteFsOptions) {
     this.api = api;
+    this.uploader = new FileUploader(api);
     this.opts = opts;
     this.filePatterns = opts.filePatterns ?? DEFAULT_FILE_PATTERNS;
     this.excludePatterns = mergeDefaultExcludePatterns(opts.excludePatterns);
@@ -198,6 +213,65 @@ export class RemoteFsAdapter {
           return { ok: false, error: `Failed to create folder "${seg}" under "${parentPath}": ${createResult.error}` };
         }
         console.log(`[RemoteFs] Created folder "${seg}" under "${parentPath}" (id=${createResult.value})`);
+        currentId = String(createResult.value);
+      } else {
+        currentId = String(found.id);
+      }
+    }
+
+    return { ok: true, value: currentId };
+  }
+
+  /**
+   * 将「相对 mapping 根」的本地目录路径解析为远端 folderId。
+   * 空字符串表示 mapping 根（resolvedRootFileId）。
+   * @param createIfMissing true=路径不存在时逐级 createFolder（上传流程）；
+   *                        false=只查找不创建，找不到返回 error（enrichment 阶段使用）。
+   */
+  async resolveFolderIdForLocalDir(
+    localDirPath: string,
+    createIfMissing = true,
+  ): Promise<ApiResult<string>> {
+    if (!this.resolvedRootFileId || !this.resolvedProjectId) {
+      return { ok: false, error: 'RemoteFsAdapter is not initialized; call init() first' };
+    }
+
+    const segments = localDirPath.split('/').filter(Boolean);
+    if (segments.length === 0) {
+      return { ok: true, value: this.resolvedRootFileId };
+    }
+
+    let currentId = this.resolvedRootFileId;
+
+    for (const seg of segments) {
+      const childResult = await this.api.getChildFiles(currentId, 1);
+      if (!childResult.ok) {
+        return {
+          ok: false,
+          error: `getChildFiles(parentId=${currentId}) failed: ${childResult.error}`,
+        };
+      }
+
+      const children = childResult.value ?? [];
+      const found = children.find((f) => f.name === seg && f.type === 1);
+      if (!found) {
+        if (!createIfMissing) {
+          return { ok: false, error: `folder "${seg}" not found (lookup-only mode)` };
+        }
+        console.log(
+          `[RemoteFs] resolveFolderIdForLocalDir: create "${seg}" under parentId=${currentId}`,
+        );
+        const createResult = await this.api.createFolder({
+          projectId: this.resolvedProjectId,
+          parentId: currentId,
+          name: seg,
+        });
+        if (!createResult.ok) {
+          return {
+            ok: false,
+            error: `createFolder "${seg}" failed: ${createResult.error}`,
+          };
+        }
         currentId = String(createResult.value);
       } else {
         currentId = String(found.id);
@@ -378,7 +452,7 @@ export class RemoteFsAdapter {
   }
 
   /**
-   * Create a remote file through uploadContent without updateFileId.
+   * Create a remote file (new upload, no existing fileId).
    * @param relativePath Relative path, for example "folder/2024.md".
    */
   async createFile(
@@ -394,7 +468,6 @@ export class RemoteFsAdapter {
     const fileName = lastSlash > 0 ? relativePath.substring(lastSlash + 1) : relativePath;
     const fileSuffix = getFileSuffix(fileName);
 
-    // Empty remoteRootFolderPath means project root; top-level files use empty folderName.
     let folderName: string;
     if (this.resolvedRootFolderPath) {
       folderName = subPath
@@ -404,27 +477,11 @@ export class RemoteFsAdapter {
       folderName = subPath;
     }
 
-    const r = await this.api.uploadContent({
-      content,
-      fileName,
-      fileSuffix,
-      folderName,
-      projectId: this.resolvedProjectId!,
-    });
-
-    if (!r.ok) return { ok: false, error: `Upload failed: ${r.error}` };
-
-    return {
-      ok: true,
-      value: {
-        remoteFileId: String(r.value.fileId),
-        remoteFolderId: r.value.folderId != null ? String(r.value.folderId) : '',
-      },
-    };
+    return this.uploader.create({ content, fileName, fileSuffix, folderName, projectId: this.resolvedProjectId! });
   }
 
   /**
-   * Update a remote file version through uploadContent + updateFileId.
+   * Update a remote file version (append new version to existing fileId).
    */
   async updateFile(
     remoteFileId: string,
@@ -432,16 +489,53 @@ export class RemoteFsAdapter {
     content: string,
   ): Promise<ApiResult<string>> {
     const fileSuffix = getFileSuffix(fileName);
-    const r = await this.api.uploadContent({
+    const r = await this.uploader.update({
       content,
       fileName,
       fileSuffix,
       updateFileId: remoteFileId,
-      versionRemark: 'OpenClaw Sync Agent',
+      projectId: this.resolvedProjectId ?? undefined,
     });
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, value: r.value.remoteFileId };
+  }
 
-    if (!r.ok) return { ok: false, error: `Upload failed: ${r.error}` };
-    return { ok: true, value: String(r.value.fileId) };
+  /**
+   * 重命名远端文件或文件夹（同目录内改名，不移动）。
+   * 对应 KB v2 updateFileName 接口。
+   */
+  async renameFile(params: UpdateFileNameParams): Promise<ApiResult<UpdateFileNameResult>> {
+    const rootFileId = params.rootFileId ?? this.resolvedRootFileId ?? undefined;
+    const r = await this.api.updateFileName({
+      fileId: params.fileId,
+      newName: params.newName,
+      nameConflictStrategy: params.nameConflictStrategy,
+      projectId: params.projectId ?? this.resolvedProjectId ?? undefined,
+      rootFileId,
+    });
+    if (!r.ok) return { ok: false, error: `renameFile 失败: ${r.error}` };
+    return {
+      ok: true,
+      value: normalizeUpdateFileNameResult(r.value, params.fileId),
+    };
+  }
+
+  /**
+   * 移动远端节点。同步侧不传 newName（换目录+改名时由调用方先 move 再 updateFileName）。
+   */
+  async moveFile(params: MoveFileParams): Promise<ApiResult<MoveFileResult>> {
+    const rootFileId = params.rootFileId ?? this.resolvedRootFileId ?? undefined;
+    const r = await this.api.moveFile({
+      fileId: params.fileId,
+      targetParentId: params.targetParentId,
+      nameConflictStrategy: params.nameConflictStrategy,
+      projectId: params.projectId ?? this.resolvedProjectId ?? undefined,
+      rootFileId,
+    });
+    if (!r.ok) return { ok: false, error: `moveFile 失败: ${r.error}` };
+    const value = normalizeMoveFileResult(r.value, params.fileId);
+    warnMoveFileResponseGaps(value, params.fileId, rootFileId != null, 'RemoteFs');
+    return { ok: true, value };
   }
 
   /** Delete remote file. */
@@ -449,6 +543,11 @@ export class RemoteFsAdapter {
     const r = await this.api.deleteFile(remoteFileId);
     if (!r.ok) return r;
     return { ok: true, value: undefined };
+  }
+
+  /** 查询远端目录的直接子项（文件+子目录），用于安全检查目录是否为空 */
+  async getChildFiles(folderId: string): Promise<ApiResult<FileListItem[]>> {
+    return this.api.getChildFiles(folderId);
   }
 
   /**

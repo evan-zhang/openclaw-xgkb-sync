@@ -4,7 +4,9 @@
   "appKey": "your-app-key-here",
   "syncDirection": "bidirectional",
   "autoSyncIntervalSec": 180,
+  "fullReconcileIntervalSec": 3600,
   "stateDbPath": "./openclaw-sync-state.db",
+  "maxConcurrentMappingsMode": "auto",
   "maxConcurrentMappings": 2,
 
   "_comment_ratelimit": "以下限速参数可选，括号内为默认值。多实例共用同一 appKey 时，建议将 maxRequestsPerMinute 设为 总限额/实例数",
@@ -31,7 +33,10 @@
       "enabled": true,
       "localRoot": "/data/openclaw/tasks/output-a",
       "remoteRootFolderPath": "OpenClaw/OutputA",
-      "excludePatterns": ["**/_conflict_*", "**/.tmp/**"]
+      "excludePatterns": ["**/_conflict_*", "**/.tmp/**"],
+      "_comment_moveConflict": "moveNameConflictStrategy: 0=重命名 1=覆盖 2=抛异常 3=跳过(默认)；renameNameConflictStrategy: 0=自动重命名 1=抛异常(默认)",
+      "moveNameConflictStrategy": 3,
+      "renameNameConflictStrategy": 1
     },
     {
       "_comment": "完整配置：全部手动指定，启动最快（0 额外 API 调用）",

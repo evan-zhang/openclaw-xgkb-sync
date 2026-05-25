@@ -106,6 +106,11 @@
               <small>手动模式使用。个人使用通常设为 2；大量独立 AppKey 可适当提高。</small>
             </label>
             <label>
+              <span>强制全量对账间隔（秒）</span>
+              <input type="number" name="fullReconcileIntervalSec" min="0" step="1" />
+              <small>建议：3600。周期性全量扫描可修复增量漏记录；0 表示关闭。升级后首次同步可能触发一次全量。</small>
+            </label>
+            <label>
               <span>API 限速（次/分钟）</span>
               <input type="number" name="maxRequestsPerMinute" min="1" step="1" />
               <small>建议：60。若日志出现 429 或 610012，再降到 30-40。</small>
@@ -235,6 +240,26 @@
             <option value="push">仅推送</option>
             <option value="pull">仅拉取</option>
           </select>
+        </label>
+        <label>
+          <span>移动冲突策略 (moveNameConflictStrategy)</span>
+          <select name="moveNameConflictStrategy">
+            <option value="">默认（3=跳过）</option>
+            <option value="0">0 = 重命名</option>
+            <option value="1">1 = 覆盖</option>
+            <option value="2">2 = 抛异常</option>
+            <option value="3">3 = 跳过</option>
+          </select>
+          <small>用于 moveFile 同名冲突；建议默认或 3（跳过）更安全。</small>
+        </label>
+        <label>
+          <span>重命名冲突策略 (renameNameConflictStrategy)</span>
+          <select name="renameNameConflictStrategy">
+            <option value="">默认（1=抛异常）</option>
+            <option value="0">0 = 自动重命名</option>
+            <option value="1">1 = 抛异常</option>
+          </select>
+          <small>用于 updateFileName 同名冲突；默认 1（抛异常）。</small>
         </label>
         <label>
           <span>文件匹配 (filePatterns)</span>

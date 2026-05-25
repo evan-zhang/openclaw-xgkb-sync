@@ -1,6 +1,7 @@
 import {
   ApiResult,
   BatchGetContentItem,
+  BatchGetMetaParams,
   CreateFolderParams,
   DownloadInfoVO,
   FileMeta,
@@ -9,8 +10,17 @@ import {
   ListChangesResponse,
   ListDescendantFilesParams,
   ListDescendantFilesResponse,
+  MoveFileParams,
+  MoveFileResult,
+  SaveFileToProjectParams,
+  SaveResourceParams,
+  SliceCheckResult,
+  UpdateFileNameParams,
+  UpdateFileNameResult,
+  UpdateFileVersionParams,
   UploadContentParams,
   UploadContentResult,
+  UploadFileSliceParams,
 } from './types';
 import {
   API_ERROR_LOG_MAX_CHARS,
@@ -64,6 +74,7 @@ function summarizeParams(params?: Record<string, unknown>): string {
  * 使用 Node 18+ 内置 fetch，移除 Obsidian requestUrl 依赖。
  */
 export class KbApiClient {
+  private static requestSeq = 0;
   private readonly serverUrl: string;
   private readonly appKey: string;
   private readonly limiter?: RateLimiter;
@@ -83,6 +94,8 @@ export class KbApiClient {
     apiPath: string,
     params?: Record<string, unknown>,
   ): Promise<ApiResult<T>> {
+    const requestId = ++KbApiClient.requestSeq;
+    const reqStart = Date.now();
     const baseUrl = this.serverUrl + apiPath;
     let url = baseUrl;
     let body: string | undefined;
@@ -98,6 +111,10 @@ export class KbApiClient {
     }
 
     const paramsSummary = summarizeParams(params);
+    console.log(
+      `[KbApi] request#${requestId} start method=${method} path=${apiPath}\n` +
+        `  params: ${paramsSummary}`,
+    );
     let lastError = '';
     let lastErrorWasRateLimit = false;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -113,6 +130,7 @@ export class KbApiClient {
       lastErrorWasRateLimit = false;
 
       try {
+        const attemptStart = Date.now();
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
         let resp: Response;
@@ -136,7 +154,7 @@ export class KbApiClient {
         if (!resp.ok) {
           const bodySnippet = truncateForLog(rawText, API_ERROR_MESSAGE_BODY_MAX);
           console.error(
-            `[KbApi] HTTP 错误 method=${method} path=${apiPath} status=${resp.status} ${resp.statusText} attempt=${attempt + 1}/${MAX_RETRIES}\n` +
+            `[KbApi] request#${requestId} HTTP 错误 method=${method} path=${apiPath} status=${resp.status} ${resp.statusText} attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
               `  url: ${urlForLog}\n` +
               `  params: ${paramsSummary}\n` +
               `  responseBody: ${truncateForLog(rawText)}`,
@@ -169,7 +187,7 @@ export class KbApiClient {
           parsed = JSON.parse(rawText);
         } catch {
           console.error(
-            `[KbApi] 响应非 JSON method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES}\n` +
+            `[KbApi] request#${requestId} 响应非 JSON method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
               `  url: ${urlForLog}\n` +
               `  params: ${paramsSummary}\n` +
               `  raw: ${truncateForLog(rawText)}`,
@@ -197,8 +215,8 @@ export class KbApiClient {
           // 业务层限流（如 610012）：可恢复，触发限速器冷却后重试
           if (RATE_LIMIT_RESULT_CODES.has(result.resultCode)) {
             console.warn(
-              `[KbApi] 业务层限流 code=${result.resultCode} method=${method} path=${apiPath}` +
-                ` attempt=${attempt + 1}/${MAX_RETRIES}\n` +
+              `[KbApi] request#${requestId} 业务层限流 code=${result.resultCode} method=${method} path=${apiPath}` +
+                ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                 `  url: ${urlForLog}\n` +
                 `  params: ${paramsSummary}\n` +
                 `  msg: ${result.resultMsg}`,
@@ -213,8 +231,8 @@ export class KbApiClient {
           // HTTP 是 200，但 resultCode 表示服务端短暂失败，按 5xx 语义退避重试。
           if (TRANSIENT_RESULT_CODES.has(result.resultCode)) {
             console.warn(
-              `[KbApi] 业务层临时错误 code=${result.resultCode} method=${method} path=${apiPath}` +
-                ` attempt=${attempt + 1}/${MAX_RETRIES}\n` +
+              `[KbApi] request#${requestId} 业务层临时错误 code=${result.resultCode} method=${method} path=${apiPath}` +
+                ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
                 `  url: ${urlForLog}\n` +
                 `  params: ${paramsSummary}\n` +
                 `  msg: ${result.resultMsg}`,
@@ -225,7 +243,7 @@ export class KbApiClient {
 
           // 其他业务错误：参数错误、权限不足等永久性错误，不重试
           console.error(
-            `[KbApi] 业务错误 method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES}\n` +
+            `[KbApi] request#${requestId} 业务错误 method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms\n` +
               `  url: ${urlForLog}\n` +
               `  params: ${paramsSummary}\n` +
               `  response: ${truncateForLog(JSON.stringify(parsed))}`,
@@ -233,6 +251,13 @@ export class KbApiClient {
           return { ok: false, error: shortErr };
         }
 
+        const dataSummary =
+          result.data != null ? summarizeParams({ data: result.data as unknown as Record<string, unknown> }) : '{}';
+        console.log(
+          `[KbApi] request#${requestId} success method=${method} path=${apiPath}` +
+            ` attempt=${attempt + 1}/${MAX_RETRIES} elapsed=${Date.now() - attemptStart}ms total=${Date.now() - reqStart}ms\n` +
+            `  data: ${dataSummary}`,
+        );
         return { ok: true, value: result.data };
       } catch (e) {
         if (e instanceof Error && e.name === 'AbortError') {
@@ -241,7 +266,7 @@ export class KbApiClient {
           lastError = e instanceof Error ? e.message : String(e);
         }
         console.error(
-          `[KbApi] 请求异常 method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES}\n` +
+          `[KbApi] request#${requestId} 请求异常 method=${method} path=${apiPath} attempt=${attempt + 1}/${MAX_RETRIES}\n` +
             `  params: ${paramsSummary}\n` +
             `  error: ${lastError}`,
         );
@@ -249,7 +274,7 @@ export class KbApiClient {
     }
 
     console.error(
-      `[KbApi] 已达最大重试 method=${method} path=${apiPath}\n` +
+      `[KbApi] request#${requestId} 已达最大重试 method=${method} path=${apiPath} total=${Date.now() - reqStart}ms\n` +
         `  params: ${paramsSummary}\n` +
         `  lastError: ${lastError}`,
     );
@@ -335,11 +360,45 @@ export class KbApiClient {
   async batchGetMeta(
     fileIds: string[],
     projectId?: string,
+    opts?: Pick<BatchGetMetaParams, 'includePath' | 'rootFileId' | 'includeContentHash'>,
   ): Promise<ApiResult<FileMeta[]>> {
     return this.request<FileMeta[]>('POST', API_PATHS.batchGetMeta, {
       fileIds,
       projectId,
+      ...(opts?.includePath !== undefined && { includePath: opts.includePath }),
+      ...(opts?.rootFileId && { rootFileId: opts.rootFileId }),
+      ...(opts?.includeContentHash !== undefined && { includeContentHash: opts.includeContentHash }),
     });
+  }
+
+  /**
+   * 文件/文件夹重命名（同目录内改名）。
+   * 不支持移动；需同时移动时请用 moveFile。
+   */
+  async updateFileName(params: UpdateFileNameParams): Promise<ApiResult<UpdateFileNameResult>> {
+    return this.request<UpdateFileNameResult>('POST', API_PATHS.updateFileName, {
+      fileId: params.fileId,
+      newName: params.newName,
+      ...(params.projectId !== undefined && { projectId: params.projectId }),
+      ...(params.nameConflictStrategy !== undefined && {
+        nameConflictStrategy: params.nameConflictStrategy,
+      }),
+      ...(params.rootFileId !== undefined && { rootFileId: params.rootFileId }),
+    });
+  }
+
+  async moveFile(params: MoveFileParams): Promise<ApiResult<MoveFileResult>> {
+    const body: Record<string, unknown> = {
+      fileId: params.fileId,
+      targetParentId: params.targetParentId,
+    };
+    if (params.projectId !== undefined) body.projectId = params.projectId;
+    if (params.nameConflictStrategy !== undefined) {
+      body.nameConflictStrategy = params.nameConflictStrategy;
+    }
+    if (params.rootFileId !== undefined) body.rootFileId = params.rootFileId;
+    // 同步侧不传 newName；换目录+改名由 move 成功后 updateFileName 完成
+    return this.request<MoveFileResult>('POST', API_PATHS.moveFile, body);
   }
 
   /**
@@ -351,6 +410,42 @@ export class KbApiClient {
     return this.request<UploadContentResult>('POST', API_PATHS.uploadContent, {
       ...params,
     });
+  }
+
+  // ==================== 分片上传 ====================
+
+  /** 预检分片 MD5，支持秒传 */
+  async getSliceIdByMd5V2(md5: string, size: number, suffix?: string): Promise<ApiResult<SliceCheckResult>> {
+    const params: Record<string, unknown> = { md5, size };
+    if (suffix) params.suffix = suffix;
+    return this.request<SliceCheckResult>('GET', API_PATHS.getSliceIdByMd5V2, params);
+  }
+
+  /** 注册已物理上传的分片 */
+  async uploadFileSliceV2(params: UploadFileSliceParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.uploadFileSliceV2, { ...params });
+  }
+
+  /** 合并所有分片生成 resourceId */
+  async saveResource(params: SaveResourceParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.saveResource, { ...params });
+  }
+
+  // ==================== 物理文件入库 ====================
+
+  /** 通过路径保存文件到项目（自动递归创建目录），返回 fileId */
+  async saveFileByPath(params: SaveFileToProjectParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.saveFileByPath, { ...params });
+  }
+
+  /** 通过父目录 ID 保存文件到项目，返回 fileId */
+  async saveFileByParentId(params: SaveFileToProjectParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.saveFileByParentId, { ...params });
+  }
+
+  /** 上传新文件内容以更新文件版本，返回 fileId */
+  async updateFileVersion(params: UpdateFileVersionParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.updateFileVersion, { ...params });
   }
 
   /** 删除文件 */

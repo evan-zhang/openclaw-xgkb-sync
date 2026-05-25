@@ -39,8 +39,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SyncEngine = void 0;
 const micromatch_1 = __importDefault(require("micromatch"));
 const nodePath = __importStar(require("path"));
+const reconcileEngine_1 = require("./reconcileEngine");
 const constants_1 = require("./constants");
 const pathSanitize_1 = require("./pathSanitize");
+const trashBin_1 = require("./trashBin");
 /**
  * 核心同步引擎（OpenClaw 版）
  * 与 Obsidian 版的主要差异：
@@ -89,6 +91,8 @@ class SyncEngine {
             skipped: 0,
             failed: 0,
             errors: [],
+            renamed: 0,
+            moved: 0,
         };
     }
     /**
@@ -104,32 +108,115 @@ class SyncEngine {
             this.progress(msg);
         };
         prog('扫描本地文件...');
-        const localFiles = await this.localFs.listFiles();
-        prog(`本地: ${localFiles.length} 个文件`);
-        const { map: remoteMap, newSince, remoteDeltaCount, fullScan } = await this.buildRemoteMap(lastSyncSince, prog, opts);
+        const [localFiles, localDirs] = await Promise.all([
+            this.localFs.listFiles(),
+            this.localFs.listDirectories(),
+        ]);
+        prog(`本地: ${localFiles.length} 个文件, ${localDirs.length} 个目录`);
+        const { map: remoteMap, newSince, remoteDeltaCount, fullScan, remoteMoveHints } = await this.buildRemoteMap(lastSyncSince, prog, opts);
         prog(`远端: ${remoteMap.size} 个文件（水位 ${newSince}）`);
         this.stats.newSince = newSince;
         this.stats.fullScan = fullScan;
-        const localMap = new Map(localFiles.map((f) => [f.path, f]));
+        let localMap = new Map(localFiles.map((f) => [f.path, f]));
         // 一次性批量加载所有文件状态，供决策循环 O(1) 查找，避免 N 次独立 SQLite 查询
-        const recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+        let recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+        // ── Phase 1：inode 对账（rename/move 检测）──────────────────────────────
+        // 只在 push / bidirectional 方向下执行（pull 不修改远端）
+        const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+        let consumedFromPaths = new Set();
+        let consumedToPaths = new Set();
+        if (syncDir !== 'pull') {
+            // 补全迁移后被清空的 inode（旧 INTEGER→新 TEXT bigint 升级时置 NULL 的记录）
+            this.backfillInodes(localFiles, recordMap);
+            // 同步本地目录 inode 到 sync_folder_state（为文件夹 rename 检测准备数据）
+            this.syncFolderInodes(localDirs);
+            const folderPathToRemoteId = this.buildFolderPathToRemoteId([...recordMap.values()], this.remoteFs.getRootFileId());
+            await this.enrichFolderPathToRemoteId(folderPathToRemoteId, localFiles, [...recordMap.values()], prog);
+            const folderRecords = this.db.getAllFolderStates(this.mapping.mappingId);
+            const { plans: renamePlans, consumedFromPaths: cfp, consumedToPaths: ctp } = (0, reconcileEngine_1.detectLocalRenames)(localFiles, localDirs, [...recordMap.values()], folderRecords, folderPathToRemoteId);
+            this.logInodeDetectionGaps(localFiles, [...recordMap.values()], renamePlans);
+            consumedFromPaths = cfp;
+            consumedToPaths = ctp;
+            if (renamePlans.length > 0) {
+                const dirPlans = renamePlans.filter((p) => p.isDirectory);
+                const filePlans = renamePlans.filter((p) => !p.isDirectory);
+                prog(`inode 对账：${renamePlans.length} 项（文件 rename=${filePlans.filter((p) => p.op === 'rename-remote').length}` +
+                    ` move=${filePlans.filter((p) => p.op === 'move-remote').length}` +
+                    ` 目录合并=${dirPlans.length}）`);
+                this.logRenamePlans(renamePlans);
+                // 先执行目录级（一次 API），再单文件
+                for (const plan of [...dirPlans, ...filePlans]) {
+                    await this.executePlan(plan, remoteMap);
+                }
+                // 重命名/移动执行后 DB 已变更，重新加载 recordMap
+                recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+            }
+        }
+        // ── Phase 1.5：远端 → 本地 rename/move（仅 bidirectional / pull 模式）────────
+        if (syncDir !== 'push') {
+            let moveHints = [];
+            if (remoteMoveHints && remoteMoveHints.length > 0) {
+                // 增量模式下已有检测结果
+                moveHints = remoteMoveHints;
+            }
+            else if (fullScan) {
+                // 全量扫描模式：通过 remoteFileId 比对 DB 中的 localPath 来检测
+                moveHints = this.detectRemoteMovesFromFullScan(remoteMap, recordMap);
+            }
+            // 过滤掉与本地 inode 检测冲突的路径（同一文件本地也 rename 了）
+            const validHints = moveHints.filter((h) => !consumedFromPaths.has(h.oldPath) && !consumedToPaths.has(h.newPath));
+            if (validHints.length > 0) {
+                // 目录级优先，避免逐文件 rename 时路径冲突
+                const sortedHints = [...validHints].sort((a, b) => (b.isDirectory ? 1 : 0) - (a.isDirectory ? 1 : 0));
+                prog(`远端 rename/move 检测到 ${sortedHints.length} 项，执行本地同步...`);
+                for (const hint of sortedHints) {
+                    await this.doRemoteMoveToLocal(hint, prog);
+                    if (hint.isDirectory) {
+                        // 目录级：所有旧前缀下的路径都需标记为已消费
+                        for (const [p] of recordMap) {
+                            if (p.startsWith(hint.oldPath + '/') || p === hint.oldPath) {
+                                consumedFromPaths.add(p);
+                                const newP = hint.newPath + p.slice(hint.oldPath.length);
+                                consumedToPaths.add(newP);
+                            }
+                        }
+                    }
+                    else {
+                        consumedFromPaths.add(hint.oldPath);
+                        consumedToPaths.add(hint.newPath);
+                    }
+                }
+                // 本地文件已被 rename，必须刷新 localMap，否则 Phase 2 会误判 delete-remote / upload-new
+                const refreshedLocalFiles = await this.localFs.listFiles();
+                localMap = new Map(refreshedLocalFiles.map((f) => [f.path, f]));
+                recordMap = new Map(this.db.getAllFileStates(this.mapping.mappingId).map((r) => [r.localPath, r]));
+            }
+        }
+        // ── Phase 2：路径对账（增量快速通道 & 完整决策循环）─────────────────────
         // 增量快速通道：远端0变更时，仅检查本地是否有变化
         // 若本地也无新增/修改/删除，则所有路径必然是 skip，直接跳过决策循环
         if (remoteDeltaCount === 0) {
-            const hasLocalNew = localFiles.some((f) => !recordMap.has(f.path));
-            const hasLocalModified = localFiles.some((f) => (recordMap.get(f.path)?.localMtime ?? -1) + constants_1.MTIME_TOLERANCE_MS < f.mtime);
-            const hasLocalDeleted = [...recordMap.keys()].some((p) => !localMap.has(p));
+            const hasLocalNew = localFiles.some((f) => !consumedToPaths.has(f.path) && !recordMap.has(f.path));
+            const hasLocalModified = localFiles.some((f) => {
+                if (consumedToPaths.has(f.path))
+                    return false;
+                return (recordMap.get(f.path)?.localMtime ?? -1) + constants_1.MTIME_TOLERANCE_MS < f.mtime;
+            });
+            const hasLocalDeleted = [...recordMap.keys()].some((p) => !consumedFromPaths.has(p) && !localMap.has(p));
             if (!hasLocalNew && !hasLocalModified && !hasLocalDeleted) {
                 const totalPaths = new Set([...localMap.keys(), ...remoteMap.keys()]).size;
                 this.stats.skipped += totalPaths;
-                await this.pruneRemoteEmptyDirectories(prog);
+                await this.pruneRemoteEmptyDirectories(prog, localDirs);
                 prog(`增量无变化（远端0变更，本地无新增/修改/删除），跳过决策，共跳过 ${totalPaths} 个路径`);
                 return this.stats;
             }
             prog(`远端0变更，但本地有变化（new=${hasLocalNew} mod=${hasLocalModified} del=${hasLocalDeleted}），继续决策`);
         }
-        const allPaths = new Set([...localMap.keys(), ...remoteMap.keys()]);
-        prog(`共 ${allPaths.size} 个路径需要决策`);
+        // 排除已被 rename/move 消费的路径，避免路径对账重复处理
+        const effectiveLocalKeys = [...localMap.keys()].filter((p) => !consumedToPaths.has(p));
+        const effectiveRemoteKeys = [...remoteMap.keys()].filter((p) => !consumedFromPaths.has(p));
+        const allPaths = new Set([...effectiveLocalKeys, ...effectiveRemoteKeys]);
+        prog(`共 ${allPaths.size} 个路径需要路径对账决策`);
         // 决策阶段
         const plans = [];
         let idx = 0;
@@ -154,7 +241,7 @@ class SyncEngine {
             ` 上传=${uploadPlans.length} 跳过=${skipCount}`);
         // 1. 删除操作串行（避免竞态）
         for (const plan of deletePlans) {
-            await this.executePlan(plan);
+            await this.executePlan(plan, remoteMap);
         }
         const hasRemoteDelete = deletePlans.some((p) => p.op === 'delete-remote');
         // 2. 下载：按 downloadConcurrency 分批，批间加 pause，由 KbApiClient 限速器节流
@@ -167,38 +254,284 @@ class SyncEngine {
             prog(`开始上传 ${uploadPlans.length} 个文件（并发=${this.uploadConcurrency}）...`);
             await this.executePlansInQueue(uploadPlans, this.uploadConcurrency, '上传', prog);
         }
-        await this.pruneRemoteEmptyDirectories(prog, {
-            hadRemoteDelete: hasRemoteDelete,
-            reason: hasRemoteDelete ? '远端文件删除后的目录整理' : undefined,
-        });
+        if (hasRemoteDelete) {
+            await this.pruneRemoteEmptyDirectories(prog, localDirs);
+        }
+        // 清理过期回收站（静默，不阻塞主流程）
+        (0, trashBin_1.cleanupTrash)(this.mapping.mappingId).catch(() => { });
         prog(`完成: ↑${this.stats.uploaded} ↓${this.stats.downloaded} ✗${this.stats.deleted}` +
+            ` 重命名:${this.stats.renamed ?? 0} 移动:${this.stats.moved ?? 0}` +
             ` 空目录清理:${this.stats.prunedRemoteDirs ?? 0} fail:${this.stats.failed} skip:${this.stats.skipped}`);
         return this.stats;
     }
-    async pruneRemoteEmptyDirectories(prog, opts) {
-        const dir = this.mapping.syncDirection ?? 'bidirectional';
-        if (dir === 'pull')
+    /**
+     * 清理远端空目录：基于 sync_folder_state 中已记录但本地已不存在的目录。
+     * 从叶子到根（路径最长优先）逐个检查，避免递归 getChildFiles。
+     * 若远端目录下仍有子项（非同步文件或非同步子目录），则保留。
+     */
+    async pruneRemoteEmptyDirectories(prog, cachedLocalDirs) {
+        const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+        if (syncDir === 'pull')
             return;
-        if (!opts?.hadRemoteDelete)
+        const localDirEntries = cachedLocalDirs ?? await this.localFs.listDirectories();
+        const localDirPaths = new Set(localDirEntries.map((d) => d.path));
+        // 补全/更新已有 folder 记录的 inode（确保下次 rename 检测有数据可用）
+        this.syncFolderInodes(localDirEntries);
+        const folderStates = this.db.getAllFolderStates(this.mapping.mappingId);
+        // 找出本地已删除但 DB 中有记录的目录
+        const orphanFolders = folderStates
+            .filter((fs) => !localDirPaths.has(fs.localPath))
+            .sort((a, b) => b.localPath.length - a.localPath.length); // 叶子优先
+        if (orphanFolders.length === 0)
             return;
-        if (opts.reason) {
-            prog(`开始清理远端空目录（${opts.reason}）...`);
+        let deleted = 0;
+        let failed = 0;
+        const errors = [];
+        // 预加载文件状态（避免循环内重复查询）
+        const allFileStates = this.db.getAllFileStates(this.mapping.mappingId);
+        const folderIdToFiles = new Map();
+        for (const f of allFileStates) {
+            if (f.remoteFolderId)
+                folderIdToFiles.set(f.remoteFolderId, true);
         }
-        const localDirs = new Set(await this.localFs.listDirectories());
-        const result = await this.remoteFs.pruneEmptyDirectories(localDirs);
-        if (!result.ok) {
-            this.stats.failed++;
-            this.stats.errors.push(`清理远端空目录失败: ${result.error}`);
-            prog(`清理远端空目录失败: ${result.error}`);
+        for (const folder of orphanFolders) {
+            // 1. 本地 DB 中仍有文件引用此 folderId → 跳过
+            if (folderIdToFiles.has(folder.remoteFolderId))
+                continue;
+            // 2. 仍有子目录记录 → 跳过（等子目录先处理）
+            const hasSubFolders = folderStates.some((f) => f.localPath !== folder.localPath && f.localPath.startsWith(folder.localPath + '/'));
+            if (hasSubFolders)
+                continue;
+            // 3. 安全检查：远端目录是否真的为空（可能有非同步文件）
+            const childResult = await this.remoteFs.getChildFiles(folder.remoteFolderId);
+            if (childResult.ok && childResult.value && childResult.value.length > 0) {
+                console.log(`[SyncEngine] 跳过远端非空目录: "${folder.localPath}" (${folder.remoteFolderId}) 远端有 ${childResult.value.length} 个子项`);
+                // 仅清理 DB 记录（本地已删，但远端有非同步内容，不删远端）
+                this.db.deleteFolderState(this.mapping.mappingId, folder.localPath);
+                continue;
+            }
+            const result = await this.remoteFs.deleteFile(folder.remoteFolderId);
+            if (result.ok) {
+                deleted++;
+                this.db.deleteFolderState(this.mapping.mappingId, folder.localPath);
+                console.log(`[SyncEngine] Pruned empty remote folder: "${folder.localPath}" (${folder.remoteFolderId})`);
+            }
+            else {
+                failed++;
+                errors.push(`${folder.localPath}: ${result.error}`);
+                this.db.deleteFolderState(this.mapping.mappingId, folder.localPath);
+                console.warn(`[SyncEngine] 远端目录删除失败: "${folder.localPath}" (${folder.remoteFolderId}): ${result.error}`);
+            }
+        }
+        this.stats.prunedRemoteDirs = (this.stats.prunedRemoteDirs ?? 0) + deleted;
+        if (failed > 0) {
+            this.stats.failed += failed;
+            this.stats.errors.push(...errors);
+        }
+        if (deleted > 0 || failed > 0) {
+            prog(`远端空目录清理: 删除=${deleted} 失败=${failed}`);
+        }
+    }
+    /**
+     * 将本地目录的 dev/ino 同步到 sync_folder_state（仅更新已有记录的 inode）。
+     */
+    syncFolderInodes(localDirEntries) {
+        const updates = [];
+        for (const dir of localDirEntries) {
+            if (dir.dev === '0' && dir.ino === '0')
+                continue;
+            const existing = this.db.getFolderState(this.mapping.mappingId, dir.path);
+            if (!existing)
+                continue;
+            if (existing.localDev === dir.dev && existing.localIno === dir.ino)
+                continue;
+            updates.push({
+                ...existing,
+                localDev: dir.dev,
+                localIno: dir.ino,
+            });
+        }
+        if (updates.length > 0) {
+            this.db.upsertFolderStateBatch(updates);
+        }
+    }
+    // ==================== 辅助工具 ====================
+    /**
+     * 从 DB 记录中构建「本地相对目录路径 → 远端 folderId」映射。
+     * 用于 reconcileEngine 在生成 move-remote 计划时解析目标 folderId。
+     */
+    /**
+     * 收集本地相对目录路径（不含文件名），用于补齐 folderPathToRemoteId。
+     */
+    collectLocalDirPaths(localFiles, records) {
+        const set = new Set();
+        const addFilePath = (filePath) => {
+            const idx = filePath.lastIndexOf('/');
+            if (idx <= 0)
+                return;
+            const dir = filePath.slice(0, idx);
+            const parts = dir.split('/');
+            for (let i = 1; i <= parts.length; i++) {
+                set.add(parts.slice(0, i).join('/'));
+            }
+        };
+        for (const f of localFiles)
+            addFilePath(f.path);
+        for (const r of records)
+            addFilePath(r.localPath);
+        return [...set].sort((a, b) => a.split('/').length - b.split('/').length);
+    }
+    /**
+     * 为 inode 对账补齐「本地目录 → 远端 folderId」。
+     * sync_file_state 只存文件不存文件夹；新目标目录若从未同步过文件，须通过 KB API 解析/创建。
+     */
+    /**
+     * 补齐 map 中缺失的目录 folderId。
+     * 由于 sync_folder_state 已被 buildFolderPathToRemoteId 优先加载，
+     * 此方法仅在极少数情况（文件被移到全新目录）才调用 KB API。
+     */
+    async enrichFolderPathToRemoteId(map, localFiles, records, prog) {
+        const dirs = this.collectLocalDirPaths(localFiles, records);
+        let resolved = 0;
+        for (const dir of dirs) {
+            if (map.has(dir))
+                continue;
+            // 仅查找已存在的远端目录，不创建新目录。
+            // 重命名/移动检测只需目标的父目录可解析即可；
+            // 目录创建留给实际上传流程（uploadContent 自动建目录）。
+            const r = await this.remoteFs.resolveFolderIdForLocalDir(dir, false);
+            if (!r.ok)
+                continue; // 远端不存在，跳过（可能是 rename 目标或尚未同步的新目录）
+            map.set(dir, r.value);
+            resolved++;
+            this.db.upsertFolderState({
+                mappingId: this.mapping.mappingId,
+                localPath: dir,
+                remoteFolderId: r.value,
+            });
+            console.log(`[SyncEngine][${this.mapping.mappingId}] 目录 folderId 已解析并持久化: "${dir}" -> ${r.value}`);
+        }
+        if (resolved > 0) {
+            prog(`已解析 ${resolved} 个本地目录的远端 folderId（供 move/rename 使用）`);
+        }
+    }
+    /**
+     * 补全因 INTEGER→TEXT 迁移被清空的 localDev/localIno。
+     * 按路径匹配当前本地文件，将 bigint stat 的正确值写回 DB。
+     */
+    backfillInodes(localFiles, recordMap) {
+        const updates = [];
+        for (const f of localFiles) {
+            if (!f.ino || f.ino === '0')
+                continue;
+            const rec = recordMap.get(f.path);
+            if (!rec || rec.localIno)
+                continue;
+            const updated = { ...rec, localDev: f.dev, localIno: f.ino };
+            updates.push(updated);
+            recordMap.set(f.path, updated);
+        }
+        if (updates.length > 0) {
+            this.db.upsertFileStateBatch(updates);
+            console.log(`[SyncEngine][${this.mapping.mappingId}] backfill inode: ${updates.length} 条记录已补全`);
+        }
+    }
+    /**
+     * 当未生成 rename/move 计划时，打印可能被路径对账误判为 upload 的 inode 移动线索。
+     */
+    logInodeDetectionGaps(localFiles, records, plans) {
+        if (plans.length > 0)
             return;
+        const inodeToEntry = new Map();
+        for (const f of localFiles) {
+            if (f.ino && f.ino !== '0')
+                inodeToEntry.set(`${f.dev}:${f.ino}`, f);
         }
-        this.stats.prunedRemoteDirs = (this.stats.prunedRemoteDirs ?? 0) + result.value.deleted;
-        if (result.value.failed > 0) {
-            this.stats.failed += result.value.failed;
-            this.stats.errors.push(...result.value.errors);
+        let gapCount = 0;
+        for (const rec of records) {
+            if (!rec.localDev || !rec.localIno || rec.localIno === '0' || !rec.remoteFileId)
+                continue;
+            const entry = inodeToEntry.get(`${rec.localDev}:${rec.localIno}`);
+            if (!entry || entry.path === rec.localPath)
+                continue;
+            gapCount++;
+            if (gapCount <= 10) {
+                console.warn(`[SyncEngine][${this.mapping.mappingId}] inode 移动未生成计划（将走路径对账 upload/delete）: ` +
+                    `"${rec.localPath}" -> "${entry.path}" remoteFileId=${rec.remoteFileId}`);
+            }
         }
-        if (result.value.deleted > 0 || result.value.failed > 0) {
-            prog(`远端空目录清理: 删除=${result.value.deleted} 失败=${result.value.failed}`);
+        if (gapCount > 10) {
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] 另有 ${gapCount - 10} 条 inode 移动未生成计划`);
+        }
+    }
+    buildFolderPathToRemoteId(records, rootFileId) {
+        const m = new Map();
+        m.set('', rootFileId);
+        // 优先从 sync_folder_state 加载（权威来源）
+        const folderStates = this.db.getAllFolderStates(this.mapping.mappingId);
+        for (const fs of folderStates) {
+            m.set(fs.localPath, fs.remoteFolderId);
+        }
+        // 兜底：从文件记录中提取未覆盖的目录
+        for (const r of records) {
+            if (!r.remoteFolderId)
+                continue;
+            const dir = r.localPath.includes('/')
+                ? r.localPath.slice(0, r.localPath.lastIndexOf('/'))
+                : '';
+            if (!m.has(dir)) {
+                m.set(dir, r.remoteFolderId);
+            }
+        }
+        return m;
+    }
+    /**
+     * 上传/下载成功后，将文件的直接父目录写入 sync_folder_state（如尚不存在）。
+     * 仅写直接父目录（该目录的 folderId 已从上传结果中获得），祖先由后续上传自然填充。
+     */
+    persistFileFolderState(filePath, remoteFolderId) {
+        if (!remoteFolderId)
+            return;
+        const dir = filePath.includes('/')
+            ? filePath.slice(0, filePath.lastIndexOf('/'))
+            : '';
+        if (!dir)
+            return; // 根目录不记
+        const existing = this.db.getFolderState(this.mapping.mappingId, dir);
+        if (existing)
+            return;
+        this.db.upsertFolderState({
+            mappingId: this.mapping.mappingId,
+            localPath: dir,
+            remoteFolderId,
+        });
+    }
+    /**
+     * 打印 inode 对账阶段生成的计划明细（用于排查目录被拆散、冲突自动改名等问题）。
+     */
+    logRenamePlans(plans) {
+        if (plans.length === 0)
+            return;
+        const maxPlanLogs = 30;
+        const shown = plans.slice(0, maxPlanLogs);
+        for (const [i, p] of shown.entries()) {
+            const base = `[SyncEngine][${this.mapping.mappingId}] inode-plan#${i + 1}/${plans.length}` +
+                ` op=${p.op} dir=${p.isDirectory ? 'Y' : 'N'}` +
+                ` from="${p.fromPath ?? ''}" to="${p.path}"`;
+            if (p.isDirectory) {
+                const samples = (p.affectedRecords ?? []).slice(0, 3).map((r) => r.localPath);
+                console.log(`${base} oldDir="${p.directoryOldPath ?? ''}" newDir="${p.directoryNewPath ?? ''}"` +
+                    ` remoteFolderFileId="${p.remoteFolderFileId ?? ''}" targetParentId="${p.targetParentId ?? ''}"` +
+                    ` renameAfterMoveName="${p.renameAfterMoveName ?? ''}" newName="${p.newName ?? ''}"` +
+                    ` affected=${p.affectedRecords?.length ?? 0} samples=${JSON.stringify(samples)}`);
+            }
+            else {
+                console.log(`${base} remoteFileId="${p.record?.remoteFileId ?? ''}" targetParentId="${p.targetParentId ?? ''}"` +
+                    ` renameAfterMoveName="${p.renameAfterMoveName ?? ''}" newName="${p.newName ?? ''}"`);
+            }
+        }
+        if (plans.length > shown.length) {
+            console.log(`[SyncEngine][${this.mapping.mappingId}] inode-plan 日志已截断: 仅展示 ${shown.length}/${plans.length}`);
         }
     }
     // ==================== 远端视图构建 ====================
@@ -326,7 +659,8 @@ class SyncEngine {
             }))
                 return null;
         }
-        // 已知 upsert：刷新元数据（过滤不匹配的）
+        // 已知 upsert：刷新元数据 + 检测远端 rename/move
+        const remoteMoveHints = [];
         if (knownUpsertIds.length > 0) {
             prog(`批量获取 ${knownUpsertIds.length} 个变更文件元数据...`);
             const metaMap = await this.remoteFs.batchGetMetaAll(knownUpsertIds);
@@ -342,12 +676,40 @@ class SyncEngine {
                     continue;
                 if (!this.matchesSync(record.localPath))
                     continue;
+                const newParentId = meta.parentId != null ? String(meta.parentId) : '';
+                const newName = meta.name ?? '';
+                const oldName = record.localPath.split('/').pop() ?? '';
+                const oldParentId = record.remoteFolderId ?? '';
+                // 检测远端 rename/move：parentId 或 name 发生变化
+                let effectivePath = record.localPath;
+                if (newParentId && oldParentId && (newParentId !== oldParentId || newName !== oldName)) {
+                    // 推导新本地路径
+                    const newFolderPath = folderIdToPath.get(newParentId);
+                    if (newFolderPath !== undefined) {
+                        const safeName = (0, pathSanitize_1.sanitizePathSegment)(newName);
+                        effectivePath = newFolderPath ? `${newFolderPath}/${safeName}` : safeName;
+                        const isMove = newParentId !== oldParentId;
+                        remoteMoveHints.push({
+                            fileId: id,
+                            oldPath: record.localPath,
+                            newPath: effectivePath,
+                            isMove,
+                            record,
+                            newRemoteFolderId: newParentId,
+                        });
+                    }
+                    else {
+                        // 目标目录无法解析（新目录），降级全量
+                        prog(`远端 move 目标目录无法解析 (parentId=${newParentId})，降级全量...`);
+                        return null;
+                    }
+                }
                 if (!addRemoteEntry({
-                    path: record.localPath,
-                    name: meta.name ?? record.localPath.split('/').pop() ?? record.localPath,
+                    path: effectivePath,
+                    name: newName || effectivePath.split('/').pop() || effectivePath,
                     mtime: meta.updateTime ?? (record.remoteMtime ?? 0),
                     remoteFileId: id,
-                    remoteFolderId: meta.parentId != null ? String(meta.parentId) : (record.remoteFolderId ?? ''),
+                    remoteFolderId: newParentId || (record.remoteFolderId ?? ''),
                 }))
                     return null;
             }
@@ -364,11 +726,16 @@ class SyncEngine {
                 return null;
         }
         this.removePathsUnderFileNodes(map, prog);
-        return { map, newSince, fullScan: false, remoteDeltaCount: upsertById.size + deleteIds.size };
+        return {
+            map,
+            newSince,
+            fullScan: false,
+            remoteDeltaCount: upsertById.size + deleteIds.size,
+            remoteMoveHints: remoteMoveHints.length > 0 ? remoteMoveHints : undefined,
+        };
     }
     /** 全量扫描（listDescendantFiles 分页） */
     async fullRemoteMap() {
-        // 先记录水位再扫描：确保扫描期间发生的变更在下一轮 listChanges 中不会被跳过
         const newSince = Date.now();
         const remoteResult = await this.remoteFs.listFiles();
         if (!remoteResult.ok)
@@ -377,8 +744,138 @@ class SyncEngine {
         for (const f of remoteResult.value)
             map.set(f.path, f);
         this.removePathsUnderFileNodes(map, (msg) => console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`));
+        // 全量扫描后批量持久化目录 → folderId 映射
+        this.persistFolderStatesFromRemoteEntries(remoteResult.value);
         console.log(`[SyncEngine][${this.mapping.mappingId}] 全量扫描完成: ${map.size} 个文件，新水位=${newSince}`);
         return { map, newSince, fullScan: true };
+    }
+    /**
+     * 全量扫描模式下，通过 remoteFileId 匹配 DB 中的已知记录来检测远端 rename/move。
+     * 如果一个文件的 remoteFileId 在 DB 中存在，但其路径（map key）与 DB 中的 localPath 不同，
+     * 说明该文件在远端被 rename 或 move 了。
+     *
+     * 还会尝试聚合多个同目录文件的路径变化为目录级 rename/move hint，
+     * 以便 doRemoteMoveToLocal 可以一次 fs.rename 整个目录。
+     */
+    detectRemoteMovesFromFullScan(remoteMap, recordMap) {
+        const fileIdToRecord = new Map();
+        for (const record of recordMap.values()) {
+            if (record.remoteFileId) {
+                fileIdToRecord.set(record.remoteFileId, record);
+            }
+        }
+        // 收集所有路径变更的文件
+        const rawChanges = [];
+        for (const [newPath, entry] of remoteMap) {
+            if (!entry.remoteFileId)
+                continue;
+            const record = fileIdToRecord.get(entry.remoteFileId);
+            if (!record)
+                continue;
+            if (record.localPath === newPath)
+                continue;
+            rawChanges.push({ oldPath: record.localPath, newPath, fileId: entry.remoteFileId, record });
+        }
+        if (rawChanges.length === 0)
+            return [];
+        // 尝试聚合为目录级 rename/move：
+        // 如果多个文件共享 "oldDir → newDir" 的前缀变化，且数量覆盖 oldDir 下所有已知文件，
+        // 则合并为一个目录级 hint（isDirectory=true）。
+        const dirMoveGroups = new Map();
+        for (const c of rawChanges) {
+            const oldDir = c.oldPath.includes('/') ? c.oldPath.slice(0, c.oldPath.lastIndexOf('/')) : '';
+            const newDir = c.newPath.includes('/') ? c.newPath.slice(0, c.newPath.lastIndexOf('/')) : '';
+            if (!oldDir && !newDir) {
+                // 根目录下的文件无法聚合为目录操作
+                continue;
+            }
+            const key = `${oldDir}\0${newDir}`;
+            if (!dirMoveGroups.has(key))
+                dirMoveGroups.set(key, []);
+            dirMoveGroups.get(key).push(c);
+        }
+        // 判定目录级移动：同一旧目录下的所有已知文件都匹配该变化模式
+        const dirHints = [];
+        const consumedFileIds = new Set();
+        for (const [key, group] of dirMoveGroups) {
+            const [oldDir, newDir] = key.split('\0');
+            if (!oldDir)
+                continue;
+            // 统计 DB 中旧目录下的所有文件数
+            let totalInOldDir = 0;
+            for (const record of recordMap.values()) {
+                if (record.localPath.startsWith(oldDir + '/'))
+                    totalInOldDir++;
+            }
+            // 若覆盖率 >= 80%（允许少量文件独立移动或删除），视为目录级操作
+            if (totalInOldDir > 0 && group.length >= totalInOldDir * 0.8 && group.length >= 2) {
+                const isMove = oldDir.includes('/')
+                    ? oldDir.slice(0, oldDir.lastIndexOf('/')) !== (newDir.includes('/') ? newDir.slice(0, newDir.lastIndexOf('/')) : '')
+                    : newDir.includes('/');
+                dirHints.push({
+                    fileId: '', // 目录级无单一 fileId
+                    oldPath: oldDir,
+                    newPath: newDir,
+                    isMove,
+                    record: group[0].record, // 仅用于类型兼容
+                    isDirectory: true,
+                });
+                for (const c of group)
+                    consumedFileIds.add(c.fileId);
+            }
+        }
+        // 剩余的单文件级 hints
+        const fileHints = [];
+        for (const c of rawChanges) {
+            if (consumedFileIds.has(c.fileId))
+                continue;
+            const oldDir = c.oldPath.includes('/') ? c.oldPath.slice(0, c.oldPath.lastIndexOf('/')) : '';
+            const newDir = c.newPath.includes('/') ? c.newPath.slice(0, c.newPath.lastIndexOf('/')) : '';
+            fileHints.push({
+                fileId: c.fileId,
+                oldPath: c.oldPath,
+                newPath: c.newPath,
+                isMove: oldDir !== newDir,
+                record: c.record,
+                newRemoteFolderId: remoteMap.get(c.newPath)?.remoteFolderId,
+            });
+        }
+        const allHints = [...dirHints, ...fileHints];
+        if (allHints.length > 0) {
+            console.log(`[SyncEngine][${this.mapping.mappingId}] 全量对账检测到远端 rename/move: ` +
+                `${dirHints.length} 个目录级, ${fileHints.length} 个文件级`);
+        }
+        return allHints;
+    }
+    /**
+     * 从远端文件列表中提取目录 → remoteFolderId 映射并批量写入 sync_folder_state。
+     */
+    persistFolderStatesFromRemoteEntries(entries) {
+        const dirMap = new Map();
+        for (const f of entries) {
+            if (!f.remoteFolderId)
+                continue;
+            const dir = f.path.includes('/')
+                ? f.path.slice(0, f.path.lastIndexOf('/'))
+                : '';
+            if (!dir)
+                continue;
+            if (!dirMap.has(dir)) {
+                dirMap.set(dir, f.remoteFolderId);
+            }
+        }
+        if (dirMap.size === 0)
+            return;
+        const states = [];
+        for (const [localPath, remoteFolderId] of dirMap) {
+            states.push({
+                mappingId: this.mapping.mappingId,
+                localPath,
+                remoteFolderId,
+            });
+        }
+        this.db.upsertFolderStateBatch(states);
+        console.log(`[SyncEngine][${this.mapping.mappingId}] 全量扫描持久化 ${states.length} 条目录映射到 sync_folder_state`);
     }
     /**
      * 知识库允许「文件节点」下再挂文件；本地不能把同名路径既当文件又当目录。
@@ -414,7 +911,9 @@ class SyncEngine {
                     return 'download-update';
                 if (dir === 'push')
                     return 'upload-update';
-                return local.mtime >= remote.mtime ? 'upload-update' : 'download-update';
+                // bidirectional 且无历史：用冲突策略决定
+                const conflictWinner = this.mapping.conflictStrategy ?? 'local-wins';
+                return conflictWinner === 'local-wins' ? 'upload-update' : 'download-update';
             }
             return 'skip';
         }
@@ -426,14 +925,34 @@ class SyncEngine {
             if (dir === 'push')
                 return 'skip';
             const remoteChanged = remote.mtime > (record.remoteMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS;
-            return remoteChanged ? 'download-update' : 'delete-remote';
+            if (remoteChanged)
+                return 'download-update';
+            const RECENTLY_SYNCED_THRESHOLD_MS = 10 * 60 * 1000;
+            if (record.syncStatus === 'done' &&
+                record.remoteFileId &&
+                record.lastSyncAt &&
+                Date.now() - record.lastSyncAt < RECENTLY_SYNCED_THRESHOLD_MS) {
+                return 'skip';
+            }
+            return 'delete-remote';
         }
         // 本地存在，远端缺失
         if (local && !remote) {
             if (dir === 'pull')
                 return 'skip';
             const localChanged = local.mtime > (record.localMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS;
-            return localChanged ? 'upload-new' : 'delete-local';
+            if (localChanged)
+                return 'upload-new';
+            // 安全阈值：如果文件是最近刚同步成功的（10 分钟内），不因一次全量列表为空就删本地。
+            // 防止 KB 接口延迟、uploadContent 目录冲突等导致 listDescendantFiles 暂时看不到文件。
+            const RECENTLY_SYNCED_THRESHOLD_MS = 10 * 60 * 1000;
+            if (record.syncStatus === 'done' &&
+                record.remoteFileId &&
+                record.lastSyncAt &&
+                Date.now() - record.lastSyncAt < RECENTLY_SYNCED_THRESHOLD_MS) {
+                return 'skip';
+            }
+            return 'delete-local';
         }
         // 双端均存在
         if (local && remote) {
@@ -445,12 +964,14 @@ class SyncEngine {
                 return dir === 'pull' ? 'skip' : 'upload-update';
             if (!localChanged && remoteChanged)
                 return dir === 'push' ? 'skip' : 'download-update';
-            // 双端均变更（LWW）
+            // 双端均变更 — 冲突
             if (dir === 'pull')
                 return 'download-update';
             if (dir === 'push')
                 return 'upload-update';
-            return local.mtime >= remote.mtime ? 'upload-update' : 'download-update';
+            // bidirectional: 使用配置的冲突策略（不再跨时钟比 mtime）
+            const conflictWinner = this.mapping.conflictStrategy ?? 'local-wins';
+            return conflictWinner === 'local-wins' ? 'upload-update' : 'download-update';
         }
         return 'skip';
     }
@@ -472,9 +993,40 @@ class SyncEngine {
             }
         }
     }
-    async executePlan(plan) {
+    /**
+     * @param remoteMap 可选：rename/move 执行后需同步更新远端视图，保持路径对账视图一致性
+     */
+    async executePlan(plan, remoteMap) {
         const { path, local, remote, record, op } = plan;
         try {
+            // 执行前 re-check：验证本地文件状态未在计划生成后发生变化
+            if (op === 'upload-new' || op === 'upload-update' || op === 'delete-local') {
+                const currentMtime = await this.localFs.getMtime(path);
+                if (op === 'delete-local') {
+                    if (currentMtime === null) {
+                        // 文件已被用户删除 → skip
+                        this.stats.skipped++;
+                        return;
+                    }
+                    if (local && Math.abs(currentMtime - local.mtime) > constants_1.MTIME_TOLERANCE_MS) {
+                        // 文件在计划生成后又被修改 → 不应删除
+                        this.stats.skipped++;
+                        return;
+                    }
+                }
+                else {
+                    if (currentMtime === null) {
+                        // 文件在计划生成后被删除 → skip
+                        this.stats.skipped++;
+                        return;
+                    }
+                    if (local && Math.abs(currentMtime - local.mtime) > constants_1.MTIME_TOLERANCE_MS) {
+                        // 文件在计划生成后又被修改 → skip 等下一轮
+                        this.stats.skipped++;
+                        return;
+                    }
+                }
+            }
             switch (op) {
                 case 'upload-new':
                     await this.doUploadNew(path, local);
@@ -494,6 +1046,22 @@ class SyncEngine {
                 case 'delete-remote':
                     await this.doDeleteRemote(path, record);
                     break;
+                case 'rename-remote':
+                    if (plan.isDirectory) {
+                        await this.doRenameRemoteDirectory(plan, remoteMap);
+                    }
+                    else {
+                        await this.doRenameRemote(plan, remoteMap);
+                    }
+                    break;
+                case 'move-remote':
+                    if (plan.isDirectory) {
+                        await this.doMoveRemoteDirectory(plan, remoteMap);
+                    }
+                    else {
+                        await this.doMoveRemote(plan, remoteMap);
+                    }
+                    break;
                 case 'skip':
                     // skip 计数已在 runSync 中批量累加，此处不重复计数
                     break;
@@ -508,10 +1076,14 @@ class SyncEngine {
             console.error(`[SyncEngine][${this.mapping.mappingId}] 同步失败 rel=${path} op=${op}${errno ? ` syscallCode=${errno}` : ''}\n` +
                 `  localAbsPath: ${localAbsPath}\n` +
                 `  error: ${msg}`);
-            // 记录失败状态（保留原 record，仅标记 failed）
-            if (record) {
+            const failRecords = plan.isDirectory && plan.affectedRecords?.length
+                ? plan.affectedRecords
+                : record
+                    ? [record]
+                    : [];
+            for (const r of failRecords) {
                 this.db.upsertFileState({
-                    ...record,
+                    ...r,
                     syncStatus: 'failed',
                     lastError: msg,
                     lastSyncAt: Date.now(),
@@ -525,9 +1097,6 @@ class SyncEngine {
         const result = await this.remoteFs.createFile(path, content);
         if (!result.ok)
             throw new Error(result.error);
-        // remoteMtime 加 MTIME_TOLERANCE_MS 作为缓冲：
-        // uploadContent 不返回服务端实际 mtime，用客户端时间 + 容差，
-        // 确保下轮增量时 remote.mtime <= record.remoteMtime，不触发虚假 download。
         const now = Date.now();
         this.db.upsertFileState({
             mappingId: this.mapping.mappingId,
@@ -536,10 +1105,14 @@ class SyncEngine {
             remoteFolderId: result.value.remoteFolderId,
             localMtime: local.mtime,
             remoteMtime: now + constants_1.MTIME_TOLERANCE_MS,
+            localDev: local.dev,
+            localIno: local.ino,
+            remoteRelativePath: path,
             syncStatus: 'done',
             lastSyncAt: now,
             lastError: null,
         });
+        this.persistFileFolderState(path, result.value.remoteFolderId);
         this.stats.uploaded++;
         this.progress(`↑ ${path}`);
     }
@@ -556,13 +1129,17 @@ class SyncEngine {
             throw new Error(result.error);
         const now = Date.now();
         const nextRemoteFileId = result.value || remoteFileId;
+        const folderId = remote?.remoteFolderId ?? record?.remoteFolderId ?? '';
         const next = record
             ? {
                 ...record,
                 remoteFileId: nextRemoteFileId,
-                remoteFolderId: remote?.remoteFolderId ?? record.remoteFolderId ?? '',
+                remoteFolderId: folderId,
                 localMtime: local.mtime,
                 remoteMtime: now + constants_1.MTIME_TOLERANCE_MS,
+                localDev: local.dev,
+                localIno: local.ino,
+                remoteRelativePath: path,
                 syncStatus: 'done',
                 lastSyncAt: now,
                 lastError: null,
@@ -571,15 +1148,19 @@ class SyncEngine {
                 mappingId: this.mapping.mappingId,
                 localPath: path,
                 remoteFileId: nextRemoteFileId,
-                remoteFolderId: remote?.remoteFolderId ?? '',
+                remoteFolderId: folderId,
                 localMtime: local.mtime,
                 remoteMtime: now + constants_1.MTIME_TOLERANCE_MS,
                 contentHash: null,
+                localDev: local.dev,
+                localIno: local.ino,
+                remoteRelativePath: path,
                 syncStatus: 'done',
                 lastSyncAt: now,
                 lastError: null,
             };
         this.db.upsertFileState(next);
+        this.persistFileFolderState(path, folderId);
         this.stats.uploaded++;
         this.progress(`↑ ${path}`);
     }
@@ -597,6 +1178,7 @@ class SyncEngine {
             lastSyncAt: Date.now(),
             lastError: null,
         });
+        this.persistFileFolderState(path, remote.remoteFolderId);
         this.stats.downloaded++;
         this.progress(`↓ ${path}`);
     }
@@ -631,12 +1213,102 @@ class SyncEngine {
         this.stats.downloaded++;
         this.progress(`↓ ${path}`);
     }
+    /**
+     * 远端 rename/move → 本地 fs.rename + 更新 DB。
+     * - 文件级：rename 单个文件，更新该文件的 DB 记录。
+     * - 目录级：rename 整个目录，批量更新 DB 中所有相关文件/文件夹记录的路径前缀。
+     */
+    async doRemoteMoveToLocal(hint, prog) {
+        const { oldPath, newPath, isMove } = hint;
+        if (hint.isDirectory) {
+            return this.doRemoteDirMoveToLocal(hint, prog);
+        }
+        const { record } = hint;
+        try {
+            const oldExists = await this.localFs.exists(oldPath);
+            if (!oldExists) {
+                console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端 ${isMove ? 'move' : 'rename'}-local 跳过: 本地旧文件不存在 "${oldPath}"`);
+                return;
+            }
+            const newExists = await this.localFs.exists(newPath);
+            if (newExists) {
+                console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端 ${isMove ? 'move' : 'rename'}-local 跳过: 目标路径已存在 "${newPath}"`);
+                return;
+            }
+            await this.localFs.rename(oldPath, newPath);
+            this.db.deleteFileState(this.mapping.mappingId, oldPath);
+            this.db.upsertFileState({
+                ...record,
+                localPath: newPath,
+                remoteFolderId: hint.newRemoteFolderId ?? record.remoteFolderId,
+                remoteRelativePath: newPath,
+                syncStatus: 'done',
+                lastSyncAt: Date.now(),
+                lastError: null,
+            });
+            const opLabel = isMove ? '→' : '↻';
+            prog(`${opLabel} 远端${isMove ? '移动' : '重命名'}→本地 ${oldPath} → ${newPath}`);
+            if (isMove) {
+                this.stats.moved = (this.stats.moved ?? 0) + 1;
+            }
+            else {
+                this.stats.renamed = (this.stats.renamed ?? 0) + 1;
+            }
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`[SyncEngine][${this.mapping.mappingId}] 远端 ${isMove ? 'move' : 'rename'}-local 失败: ${oldPath} → ${newPath}: ${msg}`);
+            this.stats.failed++;
+            this.stats.errors.push(`${oldPath}→${newPath}: ${msg}`);
+        }
+    }
+    /**
+     * 目录级远端 rename/move → 本地。
+     * 整棵子树用一次 fs.rename，然后批量更新 sync_file_state 和 sync_folder_state 中的路径前缀。
+     */
+    async doRemoteDirMoveToLocal(hint, prog) {
+        const { oldPath, newPath, isMove } = hint;
+        try {
+            const oldExists = await this.localFs.exists(oldPath);
+            if (!oldExists) {
+                console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端目录 ${isMove ? 'move' : 'rename'}-local 跳过: 本地旧目录不存在 "${oldPath}"`);
+                return;
+            }
+            const newExists = await this.localFs.exists(newPath);
+            if (newExists) {
+                console.warn(`[SyncEngine][${this.mapping.mappingId}] 远端目录 ${isMove ? 'move' : 'rename'}-local 跳过: 目标路径已存在 "${newPath}"`);
+                return;
+            }
+            await this.localFs.rename(oldPath, newPath);
+            // 批量更新 sync_file_state 中该目录前缀下的所有文件路径
+            this.db.renameFilePaths(this.mapping.mappingId, oldPath, newPath);
+            // 批量更新 sync_folder_state 中该目录前缀下的所有文件夹路径
+            this.db.renameFolderPaths(this.mapping.mappingId, oldPath, newPath);
+            const opLabel = isMove ? '→' : '↻';
+            const affectedCount = this.db.getAllFileStates(this.mapping.mappingId)
+                .filter((r) => r.localPath.startsWith(newPath + '/') || r.localPath === newPath).length;
+            prog(`${opLabel} 远端目录${isMove ? '移动' : '重命名'}→本地 ${oldPath} → ${newPath}（影响 ${affectedCount} 个文件）`);
+            if (isMove) {
+                this.stats.moved = (this.stats.moved ?? 0) + 1;
+            }
+            else {
+                this.stats.renamed = (this.stats.renamed ?? 0) + 1;
+            }
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`[SyncEngine][${this.mapping.mappingId}] 远端目录 ${isMove ? 'move' : 'rename'}-local 失败: ${oldPath} → ${newPath}: ${msg}`);
+            this.stats.failed++;
+            this.stats.errors.push(`dir ${oldPath}→${newPath}: ${msg}`);
+        }
+    }
     async doDeleteLocal(path, record) {
-        await this.localFs.deleteFile(path);
+        const absPath = this.localFs.resolve(path);
+        await (0, trashBin_1.moveToTrash)(absPath, this.mapping.mappingId, path);
         this.db.deleteFileState(this.mapping.mappingId, path);
         this.stats.deleted++;
-        this.progress(`✗ 本地删除 ${path}`);
-        void record; // record 已被 deleteFileState 移除
+        this.progress(`✗ 本地删除(→回收站) ${path}`);
+        void record;
     }
     async doDeleteRemote(path, record) {
         const result = await this.remoteFs.deleteFile(record.remoteFileId);
@@ -645,6 +1317,337 @@ class SyncEngine {
         this.db.deleteFileState(this.mapping.mappingId, path);
         this.stats.deleted++;
         this.progress(`✗ 远端删除 ${path}`);
+    }
+    /**
+     * 目录级 rename-remote：对文件夹 fileId 调用一次 updateFileName，并批量更新子文件 state。
+     * 同父目录下改名（如 dirA → dirB）时使用，不涉及 moveFile。
+     */
+    async doRenameRemoteDirectory(plan, remoteMap) {
+        const { directoryOldPath = '', directoryNewPath = '', remoteFolderFileId, newName, affectedRecords = [], } = plan;
+        if (!remoteFolderFileId || !newName) {
+            throw new Error('rename-remote(目录) 缺少 remoteFolderFileId 或 newName');
+        }
+        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-rename request:` +
+            ` fileId=${remoteFolderFileId} oldDir="${directoryOldPath}" newDir="${directoryNewPath}"` +
+            ` newName="${newName}" strategy=${this.resolveRenameConflictStrategy()}` +
+            ` affected=${affectedRecords.length}`);
+        const result = await this.remoteFs.renameFile({
+            fileId: remoteFolderFileId,
+            newName,
+            nameConflictStrategy: this.resolveRenameConflictStrategy(),
+        });
+        if (!result.ok)
+            throw new Error(result.error);
+        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-rename response:` +
+            ` fileId=${result.value.fileId} name="${result.value.name}"` +
+            ` relativePath="${result.value.relativePath ?? ''}" updateTime=${result.value.updateTime}` +
+            ` renamedDueToConflict=${result.value.renamedDueToConflict === true ? 'Y' : 'N'}`);
+        if (result.value.renamedDueToConflict) {
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] 目录 rename-remote 因冲突自动改名: ` +
+                `请求=${newName} 实际=${result.value.name}`);
+        }
+        const now = Date.now();
+        for (const rec of affectedRecords) {
+            const oldPath = rec.localPath;
+            const suffix = directoryOldPath ? oldPath.slice(directoryOldPath.length + 1) : oldPath;
+            const newPath = directoryNewPath ? `${directoryNewPath}/${suffix}` : suffix;
+            this.db.deleteFileState(this.mapping.mappingId, oldPath);
+            this.db.upsertFileState({
+                ...rec,
+                localPath: newPath,
+                // updateFileName 不会改变文件的 remoteFileId / remoteFolderId
+                remoteMtime: result.value.updateTime ?? rec.remoteMtime,
+                remoteRelativePath: newPath,
+                syncStatus: 'done',
+                lastSyncAt: now,
+                lastError: null,
+            });
+            if (remoteMap) {
+                const oldEntry = remoteMap.get(oldPath);
+                remoteMap.delete(oldPath);
+                if (oldEntry) {
+                    remoteMap.set(newPath, { ...oldEntry, path: newPath });
+                }
+            }
+        }
+        // 更新 sync_folder_state：重命名旧路径前缀为新路径
+        this.db.renameFolderPaths(this.mapping.mappingId, directoryOldPath, directoryNewPath);
+        this.stats.renamed = (this.stats.renamed ?? 0) + 1;
+        this.progress(`↻ 远端重命名目录 ${directoryOldPath} → ${directoryNewPath}（${affectedRecords.length} 个文件，1 次 updateFileName）`);
+    }
+    /**
+     * 执行远端重命名（同目录内改名）。
+     * 成功后：删除旧 DB 记录，以新路径写入新 DB 记录，并同步更新 remoteMap。
+     */
+    resolveRenameConflictStrategy() {
+        return this.mapping.renameNameConflictStrategy ?? constants_1.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY;
+    }
+    resolveMoveConflictStrategy() {
+        return this.mapping.moveNameConflictStrategy ?? constants_1.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY;
+    }
+    /** 从 moveFile 最小契约收集 id 映射（normalizeMoveFileResult 已保证 idChanged 时有 mappings） */
+    collectMoveIdMappings(result) {
+        if (!result.idChanged)
+            return [];
+        return (result.idMappings ?? []).map((m) => ({
+            sourceFileId: String(m.sourceFileId),
+            targetFileId: String(m.targetFileId),
+        }));
+    }
+    async doRenameRemote(plan, remoteMap) {
+        const { path: toPath, fromPath, newName, record, local } = plan;
+        if (!record?.remoteFileId || !fromPath || !newName) {
+            throw new Error(`rename-remote 缺少必要字段 fromPath=${fromPath} newName=${newName}`);
+        }
+        const result = await this.remoteFs.renameFile({
+            fileId: record.remoteFileId,
+            newName,
+            nameConflictStrategy: this.resolveRenameConflictStrategy(),
+        });
+        if (!result.ok)
+            throw new Error(result.error);
+        const finalPath = result.value.relativePath ?? toPath;
+        const now = Date.now();
+        this.db.deleteFileState(this.mapping.mappingId, fromPath);
+        this.db.upsertFileState({
+            ...record,
+            localPath: toPath,
+            remoteFileId: String(result.value.fileId),
+            localMtime: local?.mtime ?? record.localMtime,
+            remoteMtime: result.value.updateTime ?? record.remoteMtime,
+            localDev: local?.dev ?? record.localDev,
+            localIno: local?.ino ?? record.localIno,
+            remoteRelativePath: finalPath,
+            syncStatus: 'done',
+            lastSyncAt: now,
+            lastError: null,
+        });
+        if (remoteMap) {
+            const oldEntry = remoteMap.get(fromPath);
+            remoteMap.delete(fromPath);
+            if (oldEntry) {
+                remoteMap.set(toPath, { ...oldEntry, path: toPath, name: result.value.name });
+            }
+        }
+        if (result.value.renamedDueToConflict) {
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] rename-remote 因冲突自动改名: 请求=${newName} 实际=${result.value.name}`);
+        }
+        this.stats.renamed = (this.stats.renamed ?? 0) + 1;
+        this.progress(`↻ 远端重命名 ${fromPath} → ${toPath}`);
+    }
+    /**
+     * 执行远端移动（跨目录移动，可同时改名）。
+     * targetParentId 为空时降级为 delete-remote + upload-new（退化路径）。
+     * 成功后：处理 idMappings，删除旧 DB 记录，以新路径写入新 DB 记录，更新 remoteMap。
+     */
+    async doMoveRemote(plan, remoteMap) {
+        let { path: toPath, fromPath, targetParentId, renameAfterMoveName, record, local } = plan;
+        if (!record?.remoteFileId || !fromPath) {
+            throw new Error(`move-remote 缺少必要字段 fromPath=${fromPath}`);
+        }
+        // 目标目录尚未创建时，先创建再 move
+        if (!targetParentId) {
+            const targetDir = toPath.includes('/') ? toPath.slice(0, toPath.lastIndexOf('/')) : '';
+            if (targetDir) {
+                console.log(`[SyncEngine][${this.mapping.mappingId}] move-remote: 目标目录不存在，尝试创建 "${targetDir}"`);
+                const resolveResult = await this.remoteFs.resolveFolderIdForLocalDir(targetDir, true);
+                if (resolveResult.ok) {
+                    targetParentId = resolveResult.value;
+                    this.db.upsertFolderState({
+                        mappingId: this.mapping.mappingId,
+                        localPath: targetDir,
+                        remoteFolderId: targetParentId,
+                    });
+                }
+            }
+            if (!targetParentId) {
+                console.warn(`[SyncEngine][${this.mapping.mappingId}] move-remote 降级为 delete+upload: ` +
+                    `无法解析/创建目标目录 dir="${targetDir}"`);
+                await this.doDeleteRemote(fromPath, record);
+                await this.doUploadNew(toPath, local);
+                return;
+            }
+        }
+        const moveStrategy = this.resolveMoveConflictStrategy();
+        const moveResult = await this.remoteFs.moveFile({
+            fileId: record.remoteFileId,
+            targetParentId,
+            nameConflictStrategy: moveStrategy,
+        });
+        if (!moveResult.ok)
+            throw new Error(moveResult.error);
+        const mv = moveResult.value;
+        if (mv.mainSkipped === true) {
+            const msg = `move-remote 主节点因冲突被跳过: ${fromPath} → ${toPath}`;
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
+            this.stats.errors.push(msg);
+            return;
+        }
+        const idMappings = this.collectMoveIdMappings(mv);
+        if (idMappings.length > 0) {
+            this.db.applyRemoteIdMappings(this.mapping.mappingId, idMappings);
+            console.log(`[SyncEngine][${this.mapping.mappingId}] move-remote 已应用 ${idMappings.length} 条 idMappings`);
+        }
+        let finalFileId = String(mv.fileId);
+        let finalName = mv.name;
+        let finalRelativePath = mv.relativePath ?? toPath;
+        let finalParentId = mv.parentId != null ? String(mv.parentId) : targetParentId;
+        // 换目录且改名：先 move（保留原名），再 updateFileName（不传 moveFile.newName）
+        if (renameAfterMoveName) {
+            const renameResult = await this.remoteFs.renameFile({
+                fileId: finalFileId,
+                newName: renameAfterMoveName,
+                nameConflictStrategy: this.resolveRenameConflictStrategy(),
+            });
+            if (!renameResult.ok)
+                throw new Error(renameResult.error);
+            finalFileId = String(renameResult.value.fileId);
+            finalName = renameResult.value.name;
+            if (renameResult.value.relativePath) {
+                finalRelativePath = renameResult.value.relativePath;
+            }
+        }
+        const now = Date.now();
+        this.db.deleteFileState(this.mapping.mappingId, fromPath);
+        this.db.upsertFileState({
+            ...record,
+            localPath: toPath,
+            remoteFileId: finalFileId,
+            remoteFolderId: finalParentId,
+            localMtime: local?.mtime ?? record.localMtime,
+            remoteMtime: mv.updateTime ?? (mv.idChanged ? now + constants_1.MTIME_TOLERANCE_MS : record.remoteMtime),
+            localDev: local?.dev ?? record.localDev,
+            localIno: local?.ino ?? record.localIno,
+            remoteRelativePath: finalRelativePath,
+            syncStatus: 'done',
+            lastSyncAt: now,
+            lastError: null,
+        });
+        if (remoteMap) {
+            const oldEntry = remoteMap.get(fromPath);
+            remoteMap.delete(fromPath);
+            if (oldEntry) {
+                remoteMap.set(toPath, {
+                    ...oldEntry,
+                    path: toPath,
+                    name: finalName,
+                    remoteFileId: finalFileId,
+                    remoteFolderId: finalParentId,
+                });
+            }
+        }
+        this.stats.moved = (this.stats.moved ?? 0) + 1;
+        this.progress(`→ 远端移动 ${fromPath} → ${toPath}`);
+    }
+    /**
+     * 目录级 move-remote：对文件夹 fileId 调用一次 moveFile，并批量更新子文件 state。
+     */
+    async doMoveRemoteDirectory(plan, remoteMap) {
+        const { directoryOldPath = '', directoryNewPath = '', remoteFolderFileId, targetParentId, renameAfterMoveName, affectedRecords = [], } = plan;
+        if (!remoteFolderFileId || !targetParentId) {
+            throw new Error('move-remote(目录) 缺少 remoteFolderFileId 或 targetParentId');
+        }
+        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move request:` +
+            ` fileId=${remoteFolderFileId} oldDir="${directoryOldPath}" newDir="${directoryNewPath}"` +
+            ` targetParentId=${targetParentId} strategy=${this.resolveMoveConflictStrategy()}` +
+            ` renameAfterMoveName="${renameAfterMoveName ?? ''}" affected=${affectedRecords.length}`);
+        const moveResult = await this.remoteFs.moveFile({
+            fileId: remoteFolderFileId,
+            targetParentId,
+            nameConflictStrategy: this.resolveMoveConflictStrategy(),
+        });
+        if (!moveResult.ok)
+            throw new Error(moveResult.error);
+        const mv = moveResult.value;
+        console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move response:` +
+            ` sourceFileId=${mv.sourceFileId} fileId=${mv.fileId} idChanged=${mv.idChanged ? 'Y' : 'N'}` +
+            ` name="${mv.name}" parentId="${mv.parentId}" relativePath="${mv.relativePath ?? ''}"` +
+            ` mainSkipped=${mv.mainSkipped === true ? 'Y' : 'N'} idMappings=${mv.idMappings?.length ?? 0}`);
+        if (mv.mainSkipped === true) {
+            const msg = `目录 move-remote 因冲突被跳过: ${directoryOldPath} → ${directoryNewPath}`;
+            console.warn(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
+            this.stats.errors.push(msg);
+            return;
+        }
+        const idMappings = this.collectMoveIdMappings(mv);
+        if (idMappings.length > 0) {
+            this.db.applyRemoteIdMappings(this.mapping.mappingId, idMappings);
+        }
+        let folderFileId = String(mv.fileId);
+        if (renameAfterMoveName) {
+            console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move follow-up rename request:` +
+                ` fileId=${folderFileId} newName="${renameAfterMoveName}" strategy=${this.resolveRenameConflictStrategy()}`);
+            const renameResult = await this.remoteFs.renameFile({
+                fileId: folderFileId,
+                newName: renameAfterMoveName,
+                nameConflictStrategy: this.resolveRenameConflictStrategy(),
+            });
+            if (!renameResult.ok)
+                throw new Error(renameResult.error);
+            folderFileId = String(renameResult.value.fileId);
+            console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move follow-up rename response:` +
+                ` fileId=${renameResult.value.fileId} name="${renameResult.value.name}"` +
+                ` relativePath="${renameResult.value.relativePath ?? ''}" updateTime=${renameResult.value.updateTime}` +
+                ` renamedDueToConflict=${renameResult.value.renamedDueToConflict === true ? 'Y' : 'N'}`);
+        }
+        const idLookup = new Map(idMappings.map((m) => [m.sourceFileId, m.targetFileId]));
+        const now = Date.now();
+        let mappingLogCount = 0;
+        const maxMappingLogs = 20;
+        for (const rec of affectedRecords) {
+            const oldPath = rec.localPath;
+            const suffix = directoryOldPath
+                ? oldPath.slice(directoryOldPath.length + 1)
+                : oldPath;
+            const newPath = directoryNewPath ? `${directoryNewPath}/${suffix}` : suffix;
+            // 通过 idMappings 映射 remoteFileId（COVER 策略时文件 id 可能改变）
+            const mappedRemoteId = rec.remoteFileId
+                ? idLookup.get(rec.remoteFileId) ?? rec.remoteFileId
+                : rec.remoteFileId;
+            // remoteFolderId：保留原值，仅在 COVER 策略导致父目录 id 改变时通过 idMappings 更新。
+            // 不能统一设为 folderFileId：嵌套子目录中的文件的直接父目录并非顶层移动目录。
+            const mappedFolderId = rec.remoteFolderId
+                ? idLookup.get(rec.remoteFolderId) ?? rec.remoteFolderId
+                : rec.remoteFolderId;
+            if (mappingLogCount < maxMappingLogs) {
+                console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move map#${mappingLogCount + 1}/${affectedRecords.length}:` +
+                    ` old="${oldPath}" new="${newPath}"` +
+                    ` fileId=${rec.remoteFileId ?? ''}->${mappedRemoteId ?? ''}` +
+                    ` folderId=${rec.remoteFolderId ?? ''}->${mappedFolderId ?? ''}`);
+                mappingLogCount++;
+            }
+            this.db.deleteFileState(this.mapping.mappingId, oldPath);
+            this.db.upsertFileState({
+                ...rec,
+                localPath: newPath,
+                remoteFileId: mappedRemoteId,
+                remoteFolderId: mappedFolderId,
+                remoteMtime: mv.updateTime ?? rec.remoteMtime,
+                remoteRelativePath: newPath,
+                syncStatus: 'done',
+                lastSyncAt: now,
+                lastError: null,
+            });
+            if (remoteMap) {
+                const oldEntry = remoteMap.get(oldPath);
+                remoteMap.delete(oldPath);
+                if (oldEntry) {
+                    remoteMap.set(newPath, {
+                        ...oldEntry,
+                        path: newPath,
+                        remoteFileId: mappedRemoteId ?? oldEntry.remoteFileId,
+                        remoteFolderId: mappedFolderId ?? oldEntry.remoteFolderId,
+                    });
+                }
+            }
+        }
+        if (affectedRecords.length > maxMappingLogs) {
+            console.log(`[SyncEngine][${this.mapping.mappingId}] dir-move 文件映射日志已截断: 仅展示 ${maxMappingLogs}/${affectedRecords.length}`);
+        }
+        // 更新 sync_folder_state：旧路径前缀 → 新路径前缀
+        this.db.renameFolderPaths(this.mapping.mappingId, directoryOldPath, directoryNewPath);
+        this.stats.moved = (this.stats.moved ?? 0) + 1;
+        this.progress(`→ 远端移动目录 ${directoryOldPath} → ${directoryNewPath}（${affectedRecords.length} 个文件，1 次 moveFile）`);
     }
     /** 拉取单个文件内容，由 KbApiClient 内置限速器控制请求速率 */
     async fetchContent(remoteFileId) {

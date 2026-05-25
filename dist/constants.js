@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.API_PATHS = void 0;
+exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT = exports.UPDATE_FILE_NAME_CONFLICT = exports.API_PATHS = void 0;
 exports.mergeDefaultExcludePatterns = mergeDefaultExcludePatterns;
 exports.cleanContent = cleanContent;
 exports.extractUniqueSuffix = extractUniqueSuffix;
@@ -22,7 +22,55 @@ exports.API_PATHS = {
     getProjectList: 'document-database/project/list',
     /** 见《03-AI与纯文本高速通道》4.15，建议单次不超过 10 个文件 */
     batchGetContent: 'document-database/ai/batchGetContent',
+    /** 文件/文件夹重命名（同目录内改名，不移动） */
+    updateFileName: 'document-database/file/updateFileName',
+    /** 文件/文件夹移动到其他目录（可同时改名） */
+    moveFile: 'document-database/file/moveFile',
+    // ==================== 分片上传 ====================
+    /** 预检分片 MD5（支持秒传） */
+    getSliceIdByMd5V2: 'document-database/file/getSliceIdByMd5V2',
+    /** 注册已上传的分片 */
+    uploadFileSliceV2: 'document-database/file/uploadFileSliceV2',
+    /** 合并分片生成 resourceId */
+    saveResource: 'document-database/file/saveResource',
+    // ==================== 物理文件入库 ====================
+    /** 通过父目录 ID 保存文件到项目（需已知 parentId） */
+    saveFileByParentId: 'document-database/file/saveFileByParentId',
+    /** 通过路径保存文件到项目（自动递归创建目录） */
+    saveFileByPath: 'document-database/file/saveFileByPath',
+    /** 上传新文件内容以更新文件版本 */
+    updateFileVersion: 'document-database/file/updateFileVersion',
 };
+/**
+ * updateFileName 名称冲突策略。
+ * 冲突是指目标目录下已存在同名节点。
+ */
+exports.UPDATE_FILE_NAME_CONFLICT = {
+    /** 自动追加后缀重命名（如 "file (1).md"），不报错 */
+    RENAME: 0,
+    /** 抛出异常，由调用方决策 */
+    ERROR: 1,
+};
+/**
+ * moveFile 名称冲突策略。
+ * 冲突是指目标父目录下已存在同名节点。
+ *
+ * 注意：COVER 策略会导致 fileId 变更，调用方需处理 idMappings。
+ */
+exports.MOVE_FILE_CONFLICT = {
+    /** 自动追加后缀重命名目标侧节点，不删除任何文件 */
+    RENAME: 0,
+    /** 覆盖目标：保留冲突文件的 fileId，将移动文件作为其新版本；fileId 随之变更 */
+    COVER: 1,
+    /** 抛出异常，由调用方决策 */
+    ERROR: 2,
+    /** 跳过该冲突项 */
+    SKIP: 3,
+};
+/** moveFile 默认冲突策略：3=跳过（用户可在 mapping.moveNameConflictStrategy 覆盖） */
+exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT.SKIP;
+/** updateFileName 默认冲突策略：1=抛异常（KB 省略时亦为 1） */
+exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.UPDATE_FILE_NAME_CONFLICT.ERROR;
 /** batchGetContent 单批最大文件数 */
 exports.BATCH_GET_CONTENT_MAX = 10;
 /** batchGetMeta 单批最大文件数 */

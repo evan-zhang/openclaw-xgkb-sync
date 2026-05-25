@@ -1,4 +1,4 @@
-import { FileState, MappingState } from './types';
+import { FileState, FolderState, MappingState } from './types';
 /** SQLite 状态库（使用 node-sqlite3-wasm，无需原生编译） */
 export declare class SyncStateDb {
     private readonly db;
@@ -28,6 +28,19 @@ export declare class SyncStateDb {
     getAllFileStates(mappingId: string): FileState[];
     upsertFileState(state: FileState): void;
     /**
+     * 通过 inode 标识查找文件状态。
+     * dev="0" 或 ino="0" 时直接返回 undefined（平台不支持，退化为路径查找）。
+     */
+    getFileStateByLocalKey(mappingId: string, dev: string, ino: string): FileState | undefined;
+    /**
+     * 批量更新因 moveFile(cover) 导致的远端 fileId 变更。
+     * 适用于移动目录时子节点 fileId 随覆盖策略发生变更的场景。
+     */
+    applyRemoteIdMappings(mappingId: string, mappings: Array<{
+        sourceFileId: string;
+        targetFileId: string;
+    }>): void;
+    /**
      * 在单次事务中批量写入多条文件状态，比逐条写入快 10x 以上。
      * 用于同步完成后批量提交结果。
      */
@@ -35,6 +48,20 @@ export declare class SyncStateDb {
     deleteFileState(mappingId: string, localPath: string): void;
     /** 清除某 mapping 所有文件状态（用于强制全量重建） */
     clearMappingFiles(mappingId: string): void;
+    getFolderState(mappingId: string, localPath: string): FolderState | undefined;
+    getFolderStateByRemoteId(mappingId: string, remoteFolderId: string): FolderState | undefined;
+    getAllFolderStates(mappingId: string): FolderState[];
+    getFolderStateByLocalKey(mappingId: string, dev: string, ino: string): FolderState | undefined;
+    upsertFolderState(state: FolderState): void;
+    upsertFolderStateBatch(states: FolderState[]): void;
+    deleteFolderState(mappingId: string, localPath: string): void;
+    /** 批量删除路径前缀匹配的文件夹记录（目录被删除时级联清理子目录） */
+    deleteFolderStatesUnder(mappingId: string, dirPrefix: string): void;
+    /** 批量更新路径前缀（目录重命名/移动后更新所有子目录路径） */
+    renameFolderPaths(mappingId: string, oldPrefix: string, newPrefix: string): void;
+    /** 批量更新文件路径前缀（目录重命名/移动后更新所有子文件路径） */
+    renameFilePaths(mappingId: string, oldPrefix: string, newPrefix: string): void;
+    clearMappingFolders(mappingId: string): void;
     insertOpLog(entry: {
         idempotencyKey: string;
         mappingId: string;

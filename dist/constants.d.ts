@@ -16,7 +16,55 @@ export declare const API_PATHS: {
     readonly getProjectList: "document-database/project/list";
     /** 见《03-AI与纯文本高速通道》4.15，建议单次不超过 10 个文件 */
     readonly batchGetContent: "document-database/ai/batchGetContent";
+    /** 文件/文件夹重命名（同目录内改名，不移动） */
+    readonly updateFileName: "document-database/file/updateFileName";
+    /** 文件/文件夹移动到其他目录（可同时改名） */
+    readonly moveFile: "document-database/file/moveFile";
+    /** 预检分片 MD5（支持秒传） */
+    readonly getSliceIdByMd5V2: "document-database/file/getSliceIdByMd5V2";
+    /** 注册已上传的分片 */
+    readonly uploadFileSliceV2: "document-database/file/uploadFileSliceV2";
+    /** 合并分片生成 resourceId */
+    readonly saveResource: "document-database/file/saveResource";
+    /** 通过父目录 ID 保存文件到项目（需已知 parentId） */
+    readonly saveFileByParentId: "document-database/file/saveFileByParentId";
+    /** 通过路径保存文件到项目（自动递归创建目录） */
+    readonly saveFileByPath: "document-database/file/saveFileByPath";
+    /** 上传新文件内容以更新文件版本 */
+    readonly updateFileVersion: "document-database/file/updateFileVersion";
 };
+/**
+ * updateFileName 名称冲突策略。
+ * 冲突是指目标目录下已存在同名节点。
+ */
+export declare const UPDATE_FILE_NAME_CONFLICT: {
+    /** 自动追加后缀重命名（如 "file (1).md"），不报错 */
+    readonly RENAME: 0;
+    /** 抛出异常，由调用方决策 */
+    readonly ERROR: 1;
+};
+export type UpdateFileNameConflict = (typeof UPDATE_FILE_NAME_CONFLICT)[keyof typeof UPDATE_FILE_NAME_CONFLICT];
+/**
+ * moveFile 名称冲突策略。
+ * 冲突是指目标父目录下已存在同名节点。
+ *
+ * 注意：COVER 策略会导致 fileId 变更，调用方需处理 idMappings。
+ */
+export declare const MOVE_FILE_CONFLICT: {
+    /** 自动追加后缀重命名目标侧节点，不删除任何文件 */
+    readonly RENAME: 0;
+    /** 覆盖目标：保留冲突文件的 fileId，将移动文件作为其新版本；fileId 随之变更 */
+    readonly COVER: 1;
+    /** 抛出异常，由调用方决策 */
+    readonly ERROR: 2;
+    /** 跳过该冲突项 */
+    readonly SKIP: 3;
+};
+export type MoveFileConflict = (typeof MOVE_FILE_CONFLICT)[keyof typeof MOVE_FILE_CONFLICT];
+/** moveFile 默认冲突策略：3=跳过（用户可在 mapping.moveNameConflictStrategy 覆盖） */
+export declare const DEFAULT_MOVE_NAME_CONFLICT_STRATEGY: MoveFileConflict;
+/** updateFileName 默认冲突策略：1=抛异常（KB 省略时亦为 1） */
+export declare const DEFAULT_RENAME_NAME_CONFLICT_STRATEGY: UpdateFileNameConflict;
 /** batchGetContent 单批最大文件数 */
 export declare const BATCH_GET_CONTENT_MAX = 10;
 /** batchGetMeta 单批最大文件数 */

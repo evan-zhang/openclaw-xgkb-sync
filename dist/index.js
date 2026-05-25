@@ -39,10 +39,23 @@ const constants_1 = require("./constants");
 const config_1 = require("./config");
 const scheduler_1 = require("./scheduler");
 const managementApi_1 = require("./managementApi");
+/** 默认日志目录（相对进程工作目录，一般为项目根） */
+const DEFAULT_LOG_DIR = 'logs';
+function formatLogDate(d = new Date()) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+/** 未指定 --log-file / 环境变量时，按日写入 logs/openclaw-sync-YYYY-MM-DD.log */
+function defaultLogFilePath() {
+    return path.resolve(DEFAULT_LOG_DIR, `openclaw-sync-${formatLogDate()}.log`);
+}
 function parseArgs() {
     const args = process.argv.slice(2);
     let configPath = './config.json';
     let logFile;
+    let noLogFile = false;
     for (let i = 0; i < args.length; i++) {
         if ((args[i] === '--config' || args[i] === '-c') && args[i + 1]) {
             configPath = args[++i];
@@ -50,14 +63,27 @@ function parseArgs() {
         else if (args[i] === '--log-file' && args[i + 1]) {
             logFile = args[++i];
         }
+        else if (args[i] === '--no-log-file') {
+            noLogFile = true;
+        }
     }
-    return { configPath, logFile };
+    return { configPath, logFile, noLogFile };
+}
+function resolveLogFilePath(opts) {
+    if (opts.noLogFile)
+        return undefined;
+    const fromEnv = process.env.OPENCLAW_SYNC_LOG_FILE?.trim();
+    if (opts.logFileArg)
+        return path.resolve(opts.logFileArg);
+    if (fromEnv)
+        return path.resolve(fromEnv);
+    return defaultLogFilePath();
 }
 async function main() {
-    const { configPath, logFile: logFileArg } = parseArgs();
-    const logFilePath = logFileArg ?? (process.env.OPENCLAW_SYNC_LOG_FILE?.trim() || undefined);
+    const { configPath, logFile: logFileArg, noLogFile } = parseArgs();
+    const logFilePath = resolveLogFilePath({ logFileArg, noLogFile });
     if (logFilePath) {
-        (0, consoleTee_1.installConsoleTee)(path.resolve(logFilePath));
+        (0, consoleTee_1.installConsoleTee)(logFilePath);
     }
     const absConfigPath = path.resolve(configPath);
     console.log(`[OpenClaw Sync] 启动中...`);

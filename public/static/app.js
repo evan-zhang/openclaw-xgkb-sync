@@ -226,6 +226,7 @@
             <div class="actions">
               <button type="button" class="btn btn-sm btn-secondary btn-sync-one" ${!m.enabled ? 'disabled' : ''}>同步</button>
               <button type="button" class="btn btn-sm btn-secondary btn-edit">编辑</button>
+              <button type="button" class="btn btn-sm btn-warning btn-reset">清空DB</button>
               <button type="button" class="btn btn-sm btn-danger btn-delete">删除</button>
             </div>
           </div>
@@ -267,6 +268,9 @@
     });
     container.querySelectorAll('.btn-edit').forEach((btn) => {
       btn.addEventListener('click', () => openMappingModal(btn.closest('.mapping-card').dataset.id));
+    });
+    container.querySelectorAll('.btn-reset').forEach((btn) => {
+      btn.addEventListener('click', () => resetMapping(btn.closest('.mapping-card').dataset.id));
     });
     container.querySelectorAll('.btn-delete').forEach((btn) => {
       btn.addEventListener('click', () => deleteMapping(btn.closest('.mapping-card').dataset.id));
@@ -322,6 +326,17 @@
     }
   }
 
+  async function resetMapping(id) {
+    if (!confirm(`确定清空映射「${id}」的同步状态（DB 记录）？\n下次同步将全量重新对账。`)) return;
+    try {
+      const data = await api('POST', `/mappings/${encodeURIComponent(id)}/reset`);
+      toast(data.message, 'success');
+      await refreshAll();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
   // ==================== Mapping modal ====================
 
   const modal = $('#mappingModal');
@@ -350,6 +365,14 @@
       $('input[name="remoteRootFolderPath"]', mappingForm).value = m.remoteRootFolderPath || '';
       $('input[name="remoteRootFileId"]', mappingForm).value = m.remoteRootFileId || '';
       $('select[name="syncDirection"]', mappingForm).value = m.syncDirection || '';
+      $('select[name="moveNameConflictStrategy"]', mappingForm).value =
+        m.moveNameConflictStrategy === undefined || m.moveNameConflictStrategy === null
+          ? ''
+          : String(m.moveNameConflictStrategy);
+      $('select[name="renameNameConflictStrategy"]', mappingForm).value =
+        m.renameNameConflictStrategy === undefined || m.renameNameConflictStrategy === null
+          ? ''
+          : String(m.renameNameConflictStrategy);
       $('input[name="filePatterns"]', mappingForm).value =
         m.filePatterns ? JSON.stringify(m.filePatterns) : '';
       $('input[name="excludePatterns"]', mappingForm).value =
@@ -392,6 +415,12 @@
 
     const syncDir = (fd.get('syncDirection') || '').toString();
     if (syncDir) body.syncDirection = syncDir;
+
+    const moveConflict = (fd.get('moveNameConflictStrategy') || '').toString().trim();
+    if (moveConflict) body.moveNameConflictStrategy = Number(moveConflict);
+
+    const renameConflict = (fd.get('renameNameConflictStrategy') || '').toString().trim();
+    if (renameConflict) body.renameNameConflictStrategy = Number(renameConflict);
 
     try {
       const fp = parseJsonArray((fd.get('filePatterns') || '').toString());

@@ -113,7 +113,10 @@
 | `serverUrl` | `string` | 知识库 API 根地址 |
 | `syncDirection` | `string` | `bidirectional` \| `push` \| `pull` |
 | `autoSyncIntervalSec` | `number` | 自动同步间隔秒 |
-| `maxConcurrentMappings` | `number` \| 省略 | 最大并发 mapping 数 |
+| `fullReconcileIntervalSec` | `number` \| 省略 | 强制全量对账间隔秒，默认 `3600`；`0` = 关闭 |
+| `maxConcurrentMappingsMode` | `string` \| 省略 | `auto` \| `manual`，默认 `auto` |
+| `maxConcurrentMappings` | `number` \| 省略 | 手动模式下的最大并发 mapping 数 |
+| `effectiveMaxConcurrentMappings` | `number` | 当前实际生效的并发 mapping 数（`auto` 模式下为计算值） |
 | `maxRequestsPerMinute` | `number` \| 省略 | 每 appKey 限速 |
 | `mappingCount` | `number` | mapping 总数 |
 | `enabledMappingCount` | `number` | 已启用 mapping 数 |
@@ -128,7 +131,34 @@
 | `syncDirection` | `string` | 本条或回退到全局 |
 | `isSyncing` | `boolean` | 是否正在同步 |
 | `pendingSync` | `boolean` | 是否在排队等待再次同步 |
-| `lastState` | `object` \| 省略 | SQLite 中该 mapping 的状态摘要 |
+| `lastState` | `object` \| 省略 | SQLite 中该 mapping 的状态摘要（见下表） |
+
+### `lastState` 子对象字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `lastSyncSince` | `number` \| `null` | 上次成功同步的水位时间戳（毫秒） |
+| `lastServerTime` | `number` \| `null` | 服务端时间戳 |
+| `lastSuccessAt` | `number` \| `null` | 上次成功完成同步的本地时间戳（毫秒） |
+| `lastFullScanAt` | `number` \| `null` | 上次成功全量对账的本地时间戳（毫秒） |
+| `lastError` | `string` \| `null` | 上次错误摘要 |
+| `lastStats` | `object` \| `null` | 最近一次同步的统计（见下表） |
+| `resolvedRootFileId` | `string` \| `null` | 缓存的远端根 fileId |
+| `resolvedProjectId` | `string` \| `null` | 缓存的空间 ID |
+
+### `lastStats` 子对象字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `uploaded` | `number` | 上传文件数 |
+| `downloaded` | `number` | 下载文件数 |
+| `deleted` | `number` | 删除文件数 |
+| `prunedRemoteDirs` | `number` \| 省略 | 清理的远端空目录数 |
+| `skipped` | `number` | 跳过路径数 |
+| `failed` | `number` | 失败数 |
+| `errors` | `array` | 错误消息字符串列表 |
+| `newSince` | `number` \| 省略 | 本次同步推进后的水位 |
+| `fullScan` | `boolean` \| 省略 | 本次是否为全量对账 |
 
 ---
 
@@ -571,10 +601,14 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `serverUrl` | `string` | 知识库 API 根地址 |
+| `appKeyMasked` | `string` \| 省略 | 全局 AppKey 脱敏展示（前 4 + 后 4 位）；未配置时省略 |
 | `syncDirection` | `string` | 默认同步方向 |
 | `autoSyncIntervalSec` | `number` | 自动同步间隔秒 |
+| `fullReconcileIntervalSec` | `number` | 强制全量对账间隔秒，默认 `3600`；`0` = 关闭 |
 | `stateDbPath` | `string` | SQLite 状态库路径 |
-| `maxConcurrentMappings` | `number` | 最大并发 mapping 数 |
+| `maxConcurrentMappingsMode` | `string` | `auto` \| `manual` |
+| `maxConcurrentMappings` | `number` | 手动模式下的最大并发 mapping 数 |
+| `effectiveMaxConcurrentMappings` | `number` | 当前实际生效的并发 mapping 数 |
 | `maxRequestsPerMinute` | `number` | API 限速 |
 | `rateLimitBurst` | `number` | 令牌桶突发容量 |
 | `rateLimitCooldownSec` | `number` | 429 冷却秒数 |
@@ -600,7 +634,7 @@
 
 ### 请求体（JSON 对象，至少一个字段）
 
-可修改字段：`serverUrl`、`appKey`（传空字符串或 `null` 清除）、`syncDirection`、`autoSyncIntervalSec`、`stateDbPath`、`maxConcurrentMappings`、`maxRequestsPerMinute`、`rateLimitBurst`、`rateLimitCooldownSec`、`downloadConcurrency`、`uploadConcurrency`、`startupJitterMaxSec`、`managementPort`、`managementHost`。
+可修改字段：`serverUrl`、`appKey`（传空字符串或 `null` 清除）、`syncDirection`、`autoSyncIntervalSec`、`fullReconcileIntervalSec`、`stateDbPath`、`maxConcurrentMappingsMode`（`auto` \| `manual`）、`maxConcurrentMappings`、`maxRequestsPerMinute`、`rateLimitBurst`、`rateLimitCooldownSec`、`downloadConcurrency`、`uploadConcurrency`、`startupJitterMaxSec`、`managementPort`、`managementHost`。
 
 > **注意**：`managementPort` 与 `managementHost` 写入磁盘后**需重启进程**才会改变 HTTP 监听；响应中可能带 `warnings` 提示。
 
@@ -626,10 +660,12 @@
 
 浏览器访问 `http://{managementHost}:{managementPort}/` 即可打开内置管理控制台，支持：
 
-- 查看服务健康与运行状态
-- 全局配置的查看与保存
-- 同步映射的增删改查、单条/全部触发同步
+- 查看服务健康与运行状态（含每条 mapping 最近同步统计摘要）
+- 全局配置的查看与保存（普通/高级分组；全局 AppKey 脱敏展示）
+- 同步映射卡片化管理、复制本地路径、增删改查、单条/全部触发同步
 - 手动重载配置
+
+静态资源响应头为 `Cache-Control: no-cache`，避免浏览器强缓存旧版 JS/CSS。
 
 ---
 

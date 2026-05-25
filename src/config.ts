@@ -5,7 +5,6 @@ import { SyncConfig, SyncMapping } from './types';
 import {
   DEFAULT_AUTO_SYNC_INTERVAL_SEC,
   DEFAULT_DB_PATH,
-  DEFAULT_EXCLUDE_PATTERNS,
   DEFAULT_FILE_PATTERNS,
   DEFAULT_FULL_RECONCILE_INTERVAL_SEC,
   DEFAULT_MANAGEMENT_HOST,
@@ -321,6 +320,17 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
       ? (rawDir as 'bidirectional' | 'push' | 'pull')
       : undefined;
 
+  const moveNameConflictStrategy = parseMoveConflictStrategy(
+    m.moveNameConflictStrategy,
+    filePath,
+    loc,
+  );
+  const renameNameConflictStrategy = parseRenameConflictStrategy(
+    m.renameNameConflictStrategy,
+    filePath,
+    loc,
+  );
+
   return {
     mappingId: m.mappingId as string,
     enabled: typeof m.enabled === 'boolean' ? m.enabled : true,
@@ -332,7 +342,35 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     filePatterns,
     excludePatterns,
     syncDirection: mappingSyncDirection,
+    moveNameConflictStrategy,
+    renameNameConflictStrategy,
   };
+}
+
+function parseMoveConflictStrategy(
+  raw: unknown,
+  filePath: string,
+  loc: string,
+): 0 | 1 | 2 | 3 | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (![0, 1, 2, 3].includes(n)) {
+    throw new Error(`${loc}.moveNameConflictStrategy 必须是 0|1|2|3: ${filePath}`);
+  }
+  return n as 0 | 1 | 2 | 3;
+}
+
+function parseRenameConflictStrategy(
+  raw: unknown,
+  filePath: string,
+  loc: string,
+): 0 | 1 | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (![0, 1].includes(n)) {
+    throw new Error(`${loc}.renameNameConflictStrategy 必须是 0|1: ${filePath}`);
+  }
+  return n as 0 | 1;
 }
 
 /**

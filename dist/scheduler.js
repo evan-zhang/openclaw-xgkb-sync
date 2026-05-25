@@ -216,15 +216,10 @@ class SyncScheduler {
             projectId: mapping.projectId,
             remoteRootFileId: mapping.remoteRootFileId,
             remoteRootFolderPath: mapping.remoteRootFolderPath,
-            // 仅当显式配置了 remoteRootFileId 时才传缓存（此时 init() 内显式配置优先级更高，传不传无影响）。
-            // 若用户靠 remoteRootFolderPath 解析，则每次启动重新解析，确保路径修改后立即生效。
-            cachedRootFileId: mapping.remoteRootFileId
-                ? (mappingState?.resolvedRootFileId ?? undefined)
-                : undefined,
-            // 同理：projectId 显式配置时才传缓存；未配置时每次重新 getPersonalProjectId()。
-            cachedProjectId: mapping.projectId
-                ? (mappingState?.resolvedProjectId ?? undefined)
-                : undefined,
+            // 始终传入 SQLite 缓存：init() 内部按 "显式配置 > 缓存 > API 解析" 优先级处理。
+            // 用户修改 remoteRootFolderPath/projectId 后 Web UI 会调 clearResolvedCache 使缓存失效。
+            cachedRootFileId: mappingState?.resolvedRootFileId ?? undefined,
+            cachedProjectId: mappingState?.resolvedProjectId ?? undefined,
             filePatterns: mapping.filePatterns,
             excludePatterns: mapping.excludePatterns,
         });
