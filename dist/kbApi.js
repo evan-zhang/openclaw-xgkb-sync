@@ -306,6 +306,35 @@ class KbApiClient {
             ...params,
         });
     }
+    // ==================== 分片上传 ====================
+    /** 预检分片 MD5，支持秒传 */
+    async getSliceIdByMd5V2(md5, size, suffix) {
+        const params = { md5, size };
+        if (suffix)
+            params.suffix = suffix;
+        return this.request('GET', constants_1.API_PATHS.getSliceIdByMd5V2, params);
+    }
+    /** 注册已物理上传的分片 */
+    async uploadFileSliceV2(params) {
+        return this.request('POST', constants_1.API_PATHS.uploadFileSliceV2, { ...params });
+    }
+    /** 合并所有分片生成 resourceId */
+    async saveResource(params) {
+        return this.request('POST', constants_1.API_PATHS.saveResource, { ...params });
+    }
+    // ==================== 物理文件入库 ====================
+    /** 通过路径保存文件到项目（自动递归创建目录），返回 fileId */
+    async saveFileByPath(params) {
+        return this.request('POST', constants_1.API_PATHS.saveFileByPath, { ...params });
+    }
+    /** 通过父目录 ID 保存文件到项目，返回 fileId */
+    async saveFileByParentId(params) {
+        return this.request('POST', constants_1.API_PATHS.saveFileByParentId, { ...params });
+    }
+    /** 上传新文件内容以更新文件版本，返回 fileId */
+    async updateFileVersion(params) {
+        return this.request('POST', constants_1.API_PATHS.updateFileVersion, { ...params });
+    }
     /** 删除文件 */
     async deleteFile(fileId) {
         const r = await this.request('POST', constants_1.API_PATHS.deleteFile, { fileId });

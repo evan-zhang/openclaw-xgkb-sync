@@ -1,5 +1,5 @@
 import { Database } from 'node-sqlite3-wasm';
-import { FileState, MappingState } from './types';
+import { FileState, FolderState, MappingState } from './types';
 import { DEFAULT_DB_PATH } from './constants';
 
 /** SQLite 状态库（使用 node-sqlite3-wasm，无需原生编译） */
@@ -39,14 +39,26 @@ export class SyncStateDb {
         sync_status           TEXT    NOT NULL DEFAULT 'done',
         last_sync_at          INTEGER,
         last_error            TEXT,
-        local_dev             INTEGER,
-        local_ino             INTEGER,
+        local_dev             TEXT,
+        local_ino             TEXT,
         remote_relative_path  TEXT,
         PRIMARY KEY (mapping_id, local_path)
       );
 
       CREATE INDEX IF NOT EXISTS idx_sync_file_remote_id
         ON sync_file_state (mapping_id, remote_file_id);
+
+      CREATE TABLE IF NOT EXISTS sync_folder_state (
+        mapping_id        TEXT    NOT NULL,
+        local_path        TEXT    NOT NULL,
+        remote_folder_id  TEXT    NOT NULL,
+        local_dev         TEXT,
+        local_ino         TEXT,
+        PRIMARY KEY (mapping_id, local_path)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sync_folder_remote_id
+        ON sync_folder_state (mapping_id, remote_folder_id);
 
       CREATE TABLE IF NOT EXISTS sync_op_log (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,8 +79,8 @@ export class SyncStateDb {
       'ALTER TABLE sync_mapping_state ADD COLUMN last_stats_json TEXT',
       'ALTER TABLE sync_mapping_state ADD COLUMN last_full_scan_at INTEGER',
       // Phase 0 迁移：inode 追踪与远端路径记录
-      'ALTER TABLE sync_file_state ADD COLUMN local_dev INTEGER',
-      'ALTER TABLE sync_file_state ADD COLUMN local_ino INTEGER',
+      'ALTER TABLE sync_file_state ADD COLUMN local_dev TEXT',
+      'ALTER TABLE sync_file_state ADD COLUMN local_ino TEXT',
       'ALTER TABLE sync_file_state ADD COLUMN remote_relative_path TEXT',
     ];
     for (const sql of migrations) {
@@ -79,12 +91,25 @@ export class SyncStateDb {
       }
     }
 
+    // 迁移：旧版本用 Number stat 存储的 INTEGER dev/ino 有精度丢失，
+    // 新版本用 BigInt stat 存储精确的 TEXT 值。将旧 INTEGER 数据清空以触发重新采集。
+    try {
+      this.db.exec(`
+        UPDATE sync_file_state SET local_dev = NULL, local_ino = NULL
+          WHERE typeof(local_ino) = 'integer';
+        UPDATE sync_folder_state SET local_dev = NULL, local_ino = NULL
+          WHERE typeof(local_ino) = 'integer';
+      `);
+    } catch {
+      // 首次建库不会有旧数据
+    }
+
     // 依赖新增列（local_dev/local_ino）的索引必须在迁移后创建，
     // 否则旧库（缺列）会在 initSchema 阶段直接报 "no such column"。
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_file_local_key
         ON sync_file_state (mapping_id, local_dev, local_ino)
-        WHERE local_dev IS NOT NULL AND local_ino IS NOT NULL AND local_ino != 0;
+        WHERE local_dev IS NOT NULL AND local_ino IS NOT NULL AND local_ino != '0';
     `);
   }
 
@@ -155,6 +180,7 @@ export class SyncStateDb {
     this.db.exec('BEGIN');
     try {
       this.db.run('DELETE FROM sync_file_state WHERE mapping_id = ?', [mappingId]);
+      this.db.run('DELETE FROM sync_folder_state WHERE mapping_id = ?', [mappingId]);
       this.db.run(
         `UPDATE sync_mapping_state
          SET last_sync_since       = NULL,
@@ -228,10 +254,10 @@ export class SyncStateDb {
 
   /**
    * 通过 inode 标识查找文件状态。
-   * dev=0 或 ino=0 时直接返回 undefined（平台不支持，退化为路径查找）。
+   * dev="0" 或 ino="0" 时直接返回 undefined（平台不支持，退化为路径查找）。
    */
-  getFileStateByLocalKey(mappingId: string, dev: number, ino: number): FileState | undefined {
-    if (dev === 0 || ino === 0) return undefined;
+  getFileStateByLocalKey(mappingId: string, dev: string, ino: string): FileState | undefined {
+    if (!dev || dev === '0' || !ino || ino === '0') return undefined;
     const rows = this.db.all(
       'SELECT * FROM sync_file_state WHERE mapping_id = ? AND local_dev = ? AND local_ino = ?',
       [mappingId, dev, ino],
@@ -291,6 +317,141 @@ export class SyncStateDb {
   /** 清除某 mapping 所有文件状态（用于强制全量重建） */
   clearMappingFiles(mappingId: string): void {
     this.db.run('DELETE FROM sync_file_state WHERE mapping_id = ?', [mappingId]);
+  }
+
+  // ==================== 文件夹状态 ====================
+
+  getFolderState(mappingId: string, localPath: string): FolderState | undefined {
+    const rows = this.db.all(
+      'SELECT * FROM sync_folder_state WHERE mapping_id = ? AND local_path = ?',
+      [mappingId, localPath],
+    ) as unknown as RawFolderState[];
+    return rows.length > 0 ? rowToFolderState(rows[0]) : undefined;
+  }
+
+  getFolderStateByRemoteId(mappingId: string, remoteFolderId: string): FolderState | undefined {
+    const rows = this.db.all(
+      'SELECT * FROM sync_folder_state WHERE mapping_id = ? AND remote_folder_id = ?',
+      [mappingId, remoteFolderId],
+    ) as unknown as RawFolderState[];
+    return rows.length > 0 ? rowToFolderState(rows[0]) : undefined;
+  }
+
+  getAllFolderStates(mappingId: string): FolderState[] {
+    const rows = this.db.all(
+      'SELECT * FROM sync_folder_state WHERE mapping_id = ?',
+      [mappingId],
+    ) as unknown as RawFolderState[];
+    return rows.map(rowToFolderState);
+  }
+
+  getFolderStateByLocalKey(mappingId: string, dev: string, ino: string): FolderState | undefined {
+    if (!dev || dev === '0' || !ino || ino === '0') return undefined;
+    const rows = this.db.all(
+      'SELECT * FROM sync_folder_state WHERE mapping_id = ? AND local_dev = ? AND local_ino = ?',
+      [mappingId, dev, ino],
+    ) as unknown as RawFolderState[];
+    return rows.length > 0 ? rowToFolderState(rows[0]) : undefined;
+  }
+
+  upsertFolderState(state: FolderState): void {
+    this.db.run(
+      `INSERT OR REPLACE INTO sync_folder_state
+         (mapping_id, local_path, remote_folder_id, local_dev, local_ino)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        state.mappingId,
+        state.localPath,
+        state.remoteFolderId,
+        state.localDev ?? null,
+        state.localIno ?? null,
+      ],
+    );
+  }
+
+  upsertFolderStateBatch(states: FolderState[]): void {
+    if (states.length === 0) return;
+    this.db.exec('BEGIN');
+    try {
+      for (const state of states) {
+        this.upsertFolderState(state);
+      }
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  deleteFolderState(mappingId: string, localPath: string): void {
+    this.db.run(
+      'DELETE FROM sync_folder_state WHERE mapping_id = ? AND local_path = ?',
+      [mappingId, localPath],
+    );
+  }
+
+  /** 批量删除路径前缀匹配的文件夹记录（目录被删除时级联清理子目录） */
+  deleteFolderStatesUnder(mappingId: string, dirPrefix: string): void {
+    this.db.run(
+      'DELETE FROM sync_folder_state WHERE mapping_id = ? AND (local_path = ? OR local_path LIKE ?)',
+      [mappingId, dirPrefix, `${dirPrefix}/%`],
+    );
+  }
+
+  /** 批量更新路径前缀（目录重命名/移动后更新所有子目录路径） */
+  renameFolderPaths(mappingId: string, oldPrefix: string, newPrefix: string): void {
+    this.db.exec('BEGIN');
+    try {
+      // 精确匹配旧路径本身
+      this.db.run(
+        `UPDATE sync_folder_state SET local_path = ? WHERE mapping_id = ? AND local_path = ?`,
+        [newPrefix, mappingId, oldPrefix],
+      );
+      // 匹配旧路径的子目录
+      const rows = this.db.all(
+        `SELECT local_path FROM sync_folder_state WHERE mapping_id = ? AND local_path LIKE ?`,
+        [mappingId, `${oldPrefix}/%`],
+      ) as unknown as Array<{ local_path: string }>;
+      for (const row of rows) {
+        const newPath = newPrefix + row.local_path.slice(oldPrefix.length);
+        this.db.run(
+          `UPDATE sync_folder_state SET local_path = ? WHERE mapping_id = ? AND local_path = ?`,
+          [newPath, mappingId, row.local_path],
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  /** 批量更新文件路径前缀（目录重命名/移动后更新所有子文件路径） */
+  renameFilePaths(mappingId: string, oldPrefix: string, newPrefix: string): void {
+    this.db.exec('BEGIN');
+    try {
+      const rows = this.db.all(
+        `SELECT local_path FROM sync_file_state WHERE mapping_id = ? AND (local_path = ? OR local_path LIKE ?)`,
+        [mappingId, oldPrefix, `${oldPrefix}/%`],
+      ) as unknown as Array<{ local_path: string }>;
+      for (const row of rows) {
+        const newPath = row.local_path === oldPrefix
+          ? newPrefix
+          : newPrefix + row.local_path.slice(oldPrefix.length);
+        this.db.run(
+          `UPDATE sync_file_state SET local_path = ?, remote_relative_path = ? WHERE mapping_id = ? AND local_path = ?`,
+          [newPath, newPath, mappingId, row.local_path],
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  clearMappingFolders(mappingId: string): void {
+    this.db.run('DELETE FROM sync_folder_state WHERE mapping_id = ?', [mappingId]);
   }
 
   // ==================== 操作日志 ====================
@@ -353,8 +514,8 @@ interface RawFileState {
   sync_status: string;
   last_sync_at: number | null;
   last_error: string | null;
-  local_dev: number | null;
-  local_ino: number | null;
+  local_dev: string | number | bigint | null;
+  local_ino: string | number | bigint | null;
   remote_relative_path: string | null;
 }
 
@@ -393,8 +554,35 @@ function rowToFileState(row: RawFileState): FileState {
     syncStatus: row.sync_status as FileState['syncStatus'],
     lastSyncAt: row.last_sync_at,
     lastError: row.last_error,
-    localDev: row.local_dev,
-    localIno: row.local_ino,
+    localDev: toInoStr(row.local_dev),
+    localIno: toInoStr(row.local_ino),
     remoteRelativePath: row.remote_relative_path,
   };
+}
+
+interface RawFolderState {
+  mapping_id: string;
+  local_path: string;
+  remote_folder_id: string;
+  local_dev: string | number | bigint | null;
+  local_ino: string | number | bigint | null;
+}
+
+function rowToFolderState(row: RawFolderState): FolderState {
+  return {
+    mappingId: row.mapping_id,
+    localPath: row.local_path,
+    remoteFolderId: row.remote_folder_id,
+    localDev: toInoStr(row.local_dev),
+    localIno: toInoStr(row.local_ino),
+  };
+}
+
+/**
+ * 将 DB 中读出的 dev/ino 值统一转为 string | null。
+ * 兼容旧数据（INTEGER/BigInt）和新数据（TEXT）。
+ */
+function toInoStr(val: string | number | bigint | null | undefined): string | null {
+  if (val == null) return null;
+  return String(val);
 }

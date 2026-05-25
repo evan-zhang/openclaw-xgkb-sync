@@ -222,6 +222,7 @@
             <div class="actions">
               <button type="button" class="btn btn-sm btn-secondary btn-sync-one" ${!m.enabled ? 'disabled' : ''}>同步</button>
               <button type="button" class="btn btn-sm btn-secondary btn-edit">编辑</button>
+              <button type="button" class="btn btn-sm btn-warning btn-reset">清空DB</button>
               <button type="button" class="btn btn-sm btn-danger btn-delete">删除</button>
             </div>
           </div>
@@ -263,6 +264,9 @@
     });
     container.querySelectorAll('.btn-edit').forEach((btn) => {
       btn.addEventListener('click', () => openMappingModal(btn.closest('.mapping-card').dataset.id));
+    });
+    container.querySelectorAll('.btn-reset').forEach((btn) => {
+      btn.addEventListener('click', () => resetMapping(btn.closest('.mapping-card').dataset.id));
     });
     container.querySelectorAll('.btn-delete').forEach((btn) => {
       btn.addEventListener('click', () => deleteMapping(btn.closest('.mapping-card').dataset.id));
@@ -310,6 +314,17 @@
     if (!confirm(`确定删除映射「${id}」？此操作不可撤销。`)) return;
     try {
       const data = await api('DELETE', `/mappings/${encodeURIComponent(id)}`);
+      toast(data.message, 'success');
+      await refreshAll();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }
+
+  async function resetMapping(id) {
+    if (!confirm(`确定清空映射「${id}」的同步状态（DB 记录）？\n下次同步将全量重新对账。`)) return;
+    try {
+      const data = await api('POST', `/mappings/${encodeURIComponent(id)}/reset`);
       toast(data.message, 'success');
       await refreshAll();
     } catch (e) {

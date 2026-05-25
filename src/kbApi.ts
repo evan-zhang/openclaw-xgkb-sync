@@ -12,10 +12,15 @@ import {
   ListDescendantFilesResponse,
   MoveFileParams,
   MoveFileResult,
+  SaveFileToProjectParams,
+  SaveResourceParams,
+  SliceCheckResult,
   UpdateFileNameParams,
   UpdateFileNameResult,
+  UpdateFileVersionParams,
   UploadContentParams,
   UploadContentResult,
+  UploadFileSliceParams,
 } from './types';
 import {
   API_ERROR_LOG_MAX_CHARS,
@@ -405,6 +410,42 @@ export class KbApiClient {
     return this.request<UploadContentResult>('POST', API_PATHS.uploadContent, {
       ...params,
     });
+  }
+
+  // ==================== 分片上传 ====================
+
+  /** 预检分片 MD5，支持秒传 */
+  async getSliceIdByMd5V2(md5: string, size: number, suffix?: string): Promise<ApiResult<SliceCheckResult>> {
+    const params: Record<string, unknown> = { md5, size };
+    if (suffix) params.suffix = suffix;
+    return this.request<SliceCheckResult>('GET', API_PATHS.getSliceIdByMd5V2, params);
+  }
+
+  /** 注册已物理上传的分片 */
+  async uploadFileSliceV2(params: UploadFileSliceParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.uploadFileSliceV2, { ...params });
+  }
+
+  /** 合并所有分片生成 resourceId */
+  async saveResource(params: SaveResourceParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.saveResource, { ...params });
+  }
+
+  // ==================== 物理文件入库 ====================
+
+  /** 通过路径保存文件到项目（自动递归创建目录），返回 fileId */
+  async saveFileByPath(params: SaveFileToProjectParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.saveFileByPath, { ...params });
+  }
+
+  /** 通过父目录 ID 保存文件到项目，返回 fileId */
+  async saveFileByParentId(params: SaveFileToProjectParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.saveFileByParentId, { ...params });
+  }
+
+  /** 上传新文件内容以更新文件版本，返回 fileId */
+  async updateFileVersion(params: UpdateFileVersionParams): Promise<ApiResult<number>> {
+    return this.request<number>('POST', API_PATHS.updateFileVersion, { ...params });
   }
 
   /** 删除文件 */

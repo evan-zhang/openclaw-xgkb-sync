@@ -44,6 +44,13 @@ export interface SyncMapping {
      * 默认 1。
      */
     renameNameConflictStrategy?: 0 | 1;
+    /**
+     * 双端同时修改同一文件时的冲突策略（仅 bidirectional 模式生效）：
+     * - 'local-wins'：本地版本上传覆盖远端（远端旧版本由 KB 版本历史保留）
+     * - 'remote-wins'：远端版本下载覆盖本地（本地旧版本移入回收站）
+     * 默认 'local-wins'。
+     */
+    conflictStrategy?: 'local-wins' | 'remote-wins';
 }
 export interface SyncConfig {
     /** 知识库 Open API 根地址；省略时使用生产环境默认地址（见 constants.DEFAULT_SERVER_URL） */
@@ -122,18 +129,18 @@ export interface LocalFileEntry {
     mtime: number;
     size: number;
     /**
-     * 文件系统设备号。
-     * Linux/macOS: stat.dev；Windows NTFS: Node.js 通过 GetFileInformationByHandle 派生的卷标识。
-     * 与 ino 合并为 localFileKey（`${dev}:${ino}`），用于跨路径追踪同一文件（重命名/移动检测）。
-     * 0 表示平台或文件系统不支持（FAT32、网络共享等），此时降级为路径对账。
+     * 文件系统设备号（字符串形式，保留完整精度）。
+     * Linux/macOS: stat.dev；Windows NTFS: 卷标识。
+     * 与 ino 合并为 localFileKey（`${dev}:${ino}`），用于跨路径追踪同一文件。
+     * "0" 表示平台或文件系统不支持，此时降级为路径对账。
      */
-    dev: number;
+    dev: string;
     /**
-     * 文件 inode 编号（Linux/macOS）或 NTFS 文件索引号（Windows）。
-     * Node.js 18+ 在 Windows NTFS 上通过 GetFileInformationByHandle 填充此字段；
-     * FAT32/网络驱动器等不支持的情况下返回 0，此时降级为路径对账。
+     * 文件 inode/NTFS 文件索引号（字符串形式，保留完整 64 位精度）。
+     * 使用 fs.stat({bigint:true}) 获取，避免 Number 精度丢失。
+     * "0" 表示平台不支持，此时降级为路径对账。
      */
-    ino: number;
+    ino: string;
 }
 export interface RemoteFileEntry {
     path: string;
@@ -272,6 +279,52 @@ export interface UploadContentResult {
     fileId: string | number;
     folderId?: string | number | null;
 }
+/** getSliceIdByMd5V2 响应 */
+export interface SliceCheckResult {
+    sliceId?: number | null;
+    uploadUrl?: string | null;
+    fullPath?: string | null;
+    storageType?: string | null;
+}
+/** uploadFileSliceV2 请求 */
+export interface UploadFileSliceParams {
+    filePath: string;
+    md5: string;
+    size: number;
+    storageType: string;
+}
+/** saveResource 请求 */
+export interface SaveResourceParams {
+    name: string;
+    sliceIds: number[];
+    suffix?: string;
+    size?: number;
+}
+/** saveFileByParentId / saveFileByPath 请求 */
+export interface SaveFileToProjectParams {
+    projectId: string;
+    parentId?: string;
+    path?: string;
+    name: string;
+    fileType: string;
+    suffix?: string;
+    size?: number;
+    resourceId: number;
+    nameConflictStrategy?: number;
+    isSensitive?: number;
+}
+/** updateFileVersion 请求 */
+export interface UpdateFileVersionParams {
+    id: string;
+    projectId: string;
+    resourceId: number;
+    name?: string;
+    versionStatus?: number;
+    versionName?: string;
+    versionRemark?: string;
+    suffix?: string;
+    size?: number;
+}
 export interface CreateFolderParams {
     projectId: string;
     parentId: string;
@@ -386,16 +439,15 @@ export interface FileState {
     lastSyncAt?: number | null;
     lastError?: string | null;
     /**
-     * 本地文件的设备号（stat.dev）。
-     * NULL = 尚未采集（旧记录升级前）；0 = 平台不支持（FAT32 等）；>0 = 有效值。
-     * 与 localIno 合称 localFileKey，用于跨路径追踪同一文件（重命名/移动检测）。
+     * 本地文件的设备号（字符串形式保留完整精度）。
+     * NULL = 尚未采集；"0" = 平台不支持。
      */
-    localDev?: number | null;
+    localDev?: string | null;
     /**
-     * 本地文件的 inode 编号（Linux/macOS）或 NTFS 文件索引号（Windows）。
-     * NULL = 尚未采集；0 = 平台不支持；>0 = 有效值。
+     * 本地文件的 inode/NTFS 文件索引号（字符串形式保留完整精度）。
+     * NULL = 尚未采集；"0" = 平台不支持。
      */
-    localIno?: number | null;
+    localIno?: string | null;
     /**
      * 文件在远端的相对路径（相对于 remoteRootFileId）。
      * 用于 Phase 2 远端 rename/move 检测：下次 batchGetMeta includePath 返回的 relativePath
@@ -403,6 +455,18 @@ export interface FileState {
      * NULL = 尚未记录（旧记录或路径未变化）。
      */
     remoteRelativePath?: string | null;
+}
+export interface LocalDirEntry {
+    path: string;
+    dev: string;
+    ino: string;
+}
+export interface FolderState {
+    mappingId: string;
+    localPath: string;
+    remoteFolderId: string;
+    localDev?: string | null;
+    localIno?: string | null;
 }
 export type SyncOp = 'upload-new' | 'upload-update' | 'download-new' | 'download-update' | 'delete-local' | 'delete-remote'
 /** 本地文件在同目录内改名 → 调用 updateFileName 同步到远端 */

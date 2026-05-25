@@ -5,28 +5,56 @@ import { loadConfigWithMeta } from './config';
 import { SyncScheduler } from './scheduler';
 import { ManagementApi, ReloadResult } from './managementApi';
 
-function parseArgs(): { configPath: string; logFile?: string } {
+/** 默认日志目录（相对进程工作目录，一般为项目根） */
+const DEFAULT_LOG_DIR = 'logs';
+
+function formatLogDate(d = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** 未指定 --log-file / 环境变量时，按日写入 logs/openclaw-sync-YYYY-MM-DD.log */
+function defaultLogFilePath(): string {
+  return path.resolve(DEFAULT_LOG_DIR, `openclaw-sync-${formatLogDate()}.log`);
+}
+
+function parseArgs(): { configPath: string; logFile?: string; noLogFile?: boolean } {
   const args = process.argv.slice(2);
   let configPath = './config.json';
   let logFile: string | undefined;
+  let noLogFile = false;
 
   for (let i = 0; i < args.length; i++) {
     if ((args[i] === '--config' || args[i] === '-c') && args[i + 1]) {
       configPath = args[++i];
     } else if (args[i] === '--log-file' && args[i + 1]) {
       logFile = args[++i];
+    } else if (args[i] === '--no-log-file') {
+      noLogFile = true;
     }
   }
 
-  return { configPath, logFile };
+  return { configPath, logFile, noLogFile };
+}
+
+function resolveLogFilePath(opts: {
+  logFileArg?: string;
+  noLogFile?: boolean;
+}): string | undefined {
+  if (opts.noLogFile) return undefined;
+  const fromEnv = process.env.OPENCLAW_SYNC_LOG_FILE?.trim();
+  if (opts.logFileArg) return path.resolve(opts.logFileArg);
+  if (fromEnv) return path.resolve(fromEnv);
+  return defaultLogFilePath();
 }
 
 async function main() {
-  const { configPath, logFile: logFileArg } = parseArgs();
-  const logFilePath =
-    logFileArg ?? (process.env.OPENCLAW_SYNC_LOG_FILE?.trim() || undefined);
+  const { configPath, logFile: logFileArg, noLogFile } = parseArgs();
+  const logFilePath = resolveLogFilePath({ logFileArg, noLogFile });
   if (logFilePath) {
-    installConsoleTee(path.resolve(logFilePath));
+    installConsoleTee(logFilePath);
   }
 
   const absConfigPath = path.resolve(configPath);

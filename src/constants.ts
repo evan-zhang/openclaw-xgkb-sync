@@ -20,6 +20,22 @@ export const API_PATHS = {
   updateFileName: 'document-database/file/updateFileName',
   /** 文件/文件夹移动到其他目录（可同时改名） */
   moveFile: 'document-database/file/moveFile',
+
+  // ==================== 分片上传 ====================
+  /** 预检分片 MD5（支持秒传） */
+  getSliceIdByMd5V2: 'document-database/file/getSliceIdByMd5V2',
+  /** 注册已上传的分片 */
+  uploadFileSliceV2: 'document-database/file/uploadFileSliceV2',
+  /** 合并分片生成 resourceId */
+  saveResource: 'document-database/file/saveResource',
+
+  // ==================== 物理文件入库 ====================
+  /** 通过父目录 ID 保存文件到项目（需已知 parentId） */
+  saveFileByParentId: 'document-database/file/saveFileByParentId',
+  /** 通过路径保存文件到项目（自动递归创建目录） */
+  saveFileByPath: 'document-database/file/saveFileByPath',
+  /** 上传新文件内容以更新文件版本 */
+  updateFileVersion: 'document-database/file/updateFileVersion',
 } as const;
 
 /**

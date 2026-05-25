@@ -68,7 +68,7 @@ class LocalFsAdapter {
         return entries;
     }
     /**
-     * 递归列出 localRoot 下所有纳入同步遍历范围的目录。
+     * 递归列出 localRoot 下所有纳入同步遍历范围的目录（含 dev/ino）。
      * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
      */
     async listDirectories() {
@@ -107,14 +107,14 @@ class LocalFsAdapter {
                 if (!micromatch_1.default.isMatch(safePath, this.filePatterns))
                     continue;
                 try {
-                    const stat = await fs.stat(absPath);
+                    const stat = await fs.stat(absPath, { bigint: true });
                     entries.push({
                         path: safePath,
                         name: dirent.name,
-                        mtime: stat.mtimeMs,
-                        size: stat.size,
-                        dev: stat.dev,
-                        ino: stat.ino,
+                        mtime: Number(stat.mtimeMs),
+                        size: Number(stat.size),
+                        dev: stat.dev.toString(),
+                        ino: stat.ino.toString(),
                     });
                 }
                 catch {
@@ -148,8 +148,15 @@ class LocalFsAdapter {
                 .split('/')
                 .map((seg) => (0, pathSanitize_1.sanitizePathSegment)(seg))
                 .join('/');
-            dirs.push(safePath);
-            subDirTasks.push(this.walkDirectories(path.join(absDir, dirent.name), relPath, dirs));
+            const absPath = path.join(absDir, dirent.name);
+            try {
+                const stat = await fs.stat(absPath, { bigint: true });
+                dirs.push({ path: safePath, dev: stat.dev.toString(), ino: stat.ino.toString() });
+            }
+            catch {
+                dirs.push({ path: safePath, dev: '0', ino: '0' });
+            }
+            subDirTasks.push(this.walkDirectories(absPath, relPath, dirs));
         }
         if (subDirTasks.length > 0) {
             await Promise.all(subDirTasks);

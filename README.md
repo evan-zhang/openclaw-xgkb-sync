@@ -17,6 +17,7 @@ OpenClaw 节点与玄关知识库（XGKB）文件双向同步 Agent。
 | 文档 | 何时阅读 |
 |------|----------|
 | **本文 README.md** | 安装、配置、启动、Web 控制台、生产部署、排错 |
+| **[docs/INSTALL_AND_UPDATE.md](./docs/INSTALL_AND_UPDATE.md)** | **快速安装 / 更新**（克隆、构建、git pull 升级流程） |
 | [config.example.json](./config.example.json) | 复制为 `config.json` 的配置模板 |
 | [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md) | 用 curl / 脚本 / AI 自动化增删改查 mapping 与全局配置 |
 | [docs/DESIGN.md](./docs/DESIGN.md) | 同步架构、增量策略、可靠性设计（非部署必读） |
@@ -113,6 +114,8 @@ curl.exe http://127.0.0.1:9090/health
 ---
 
 ## 快速开始
+
+**仅要安装或升级步骤** → 见 **[docs/INSTALL_AND_UPDATE.md](./docs/INSTALL_AND_UPDATE.md)**（仓库：<https://github.com/xgjk/openclaw-xgkb-sync>）。
 
 完整步骤见上文 **「从零部署清单」**。以下为常用命令速查：
 

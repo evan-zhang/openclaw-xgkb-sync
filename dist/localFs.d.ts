@@ -1,4 +1,4 @@
-import { LocalFileEntry } from './types';
+import { LocalDirEntry, LocalFileEntry } from './types';
 /**
  * 本地文件系统适配器（Node.js 版）
  * 替代 Obsidian Vault API，面向标准 Node.js `fs/promises`。
@@ -15,10 +15,10 @@ export declare class LocalFsAdapter {
      */
     listFiles(): Promise<LocalFileEntry[]>;
     /**
-     * 递归列出 localRoot 下所有纳入同步遍历范围的目录。
+     * 递归列出 localRoot 下所有纳入同步遍历范围的目录（含 dev/ino）。
      * 返回路径均为相对于 localRoot 的路径（使用 "/" 分隔），不包含根目录自身。
      */
-    listDirectories(): Promise<string[]>;
+    listDirectories(): Promise<LocalDirEntry[]>;
     private walk;
     private walkDirectories;
     /** 读取文件内容（UTF-8） */

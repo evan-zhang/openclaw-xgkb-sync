@@ -20,6 +20,18 @@ export declare const API_PATHS: {
     readonly updateFileName: "document-database/file/updateFileName";
     /** 文件/文件夹移动到其他目录（可同时改名） */
     readonly moveFile: "document-database/file/moveFile";
+    /** 预检分片 MD5（支持秒传） */
+    readonly getSliceIdByMd5V2: "document-database/file/getSliceIdByMd5V2";
+    /** 注册已上传的分片 */
+    readonly uploadFileSliceV2: "document-database/file/uploadFileSliceV2";
+    /** 合并分片生成 resourceId */
+    readonly saveResource: "document-database/file/saveResource";
+    /** 通过父目录 ID 保存文件到项目（需已知 parentId） */
+    readonly saveFileByParentId: "document-database/file/saveFileByParentId";
+    /** 通过路径保存文件到项目（自动递归创建目录） */
+    readonly saveFileByPath: "document-database/file/saveFileByPath";
+    /** 上传新文件内容以更新文件版本 */
+    readonly updateFileVersion: "document-database/file/updateFileVersion";
 };
 /**
  * updateFileName 名称冲突策略。

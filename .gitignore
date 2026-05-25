@@ -4,3 +4,7 @@ config.json
 node_modules/
 *.db
 .env
+
+# 运行日志（默认 logs/openclaw-sync-YYYY-MM-DD.log）
+logs/*
+!logs/.gitkeep

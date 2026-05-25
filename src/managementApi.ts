@@ -105,6 +105,7 @@ export class ManagementApi {
       console.log(`  POST   /mappings          新增 mapping`);
       console.log(`  PUT    /mappings/:id       upsert mapping（存在则更新，不存在则创建）`);
       console.log(`  DELETE /mappings/:id       删除 mapping`);
+      console.log(`  POST   /mappings/:id/reset 重置同步状态（清空 DB）`);
       console.log(`  POST   /sync/:mappingId`);
       console.log(`  POST   /sync  （触发所有）`);
       console.log(`  POST   /reload`);
@@ -186,6 +187,12 @@ export class ManagementApi {
     // POST /mappings  （新增）
     if (method === 'POST' && urlPath === '/mappings') {
       return this.handleCreateMapping(req, res);
+    }
+
+    // POST /mappings/:mappingId/reset  （重置同步状态：清空文件/文件夹记录+水位）
+    const resetMatch = urlPath.match(/^\/mappings\/([^/]+)\/reset$/);
+    if (method === 'POST' && resetMatch) {
+      return this.handleResetMapping(res, decodeURIComponent(resetMatch[1]));
     }
 
     // PUT /mappings/:mappingId  （upsert：存在则更新，不存在则创建）
@@ -702,6 +709,18 @@ export class ManagementApi {
 
     console.log(`[ManagementApi] 删除 mapping: ${mappingId}`);
     this.sendJson(res, 200, { ok: true, message: `mapping "${mappingId}" 已删除` });
+  }
+
+  private handleResetMapping(res: http.ServerResponse, mappingId: string): void {
+    const scheduler = this.opts.getScheduler();
+    const config = scheduler.getConfig();
+    const mapping = config.mappings.find((m) => m.mappingId === mappingId);
+    if (!mapping) {
+      return this.sendJson(res, 404, { ok: false, error: `未找到 mapping "${mappingId}"` });
+    }
+    scheduler.resetMappingState(mappingId);
+    console.log(`[ManagementApi] 已重置 mapping "${mappingId}" 的同步状态（DB 已清空）`);
+    this.sendJson(res, 200, { ok: true, message: `mapping "${mappingId}" 的同步状态已清空` });
   }
 
   // ==================== config.json 读写工具 ====================

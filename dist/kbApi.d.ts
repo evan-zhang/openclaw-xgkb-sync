@@ -1,4 +1,4 @@
-import { ApiResult, BatchGetContentItem, BatchGetMetaParams, CreateFolderParams, DownloadInfoVO, FileMeta, FileListItem, ListChangesParams, ListChangesResponse, ListDescendantFilesParams, ListDescendantFilesResponse, MoveFileParams, MoveFileResult, UpdateFileNameParams, UpdateFileNameResult, UploadContentParams, UploadContentResult } from './types';
+import { ApiResult, BatchGetContentItem, BatchGetMetaParams, CreateFolderParams, DownloadInfoVO, FileMeta, FileListItem, ListChangesParams, ListChangesResponse, ListDescendantFilesParams, ListDescendantFilesResponse, MoveFileParams, MoveFileResult, SaveFileToProjectParams, SaveResourceParams, SliceCheckResult, UpdateFileNameParams, UpdateFileNameResult, UpdateFileVersionParams, UploadContentParams, UploadContentResult, UploadFileSliceParams } from './types';
 import { RateLimiter } from './rateLimiter';
 /**
  * 玄关知识库 Open API 客户端（Node.js 版）
@@ -50,6 +50,18 @@ export declare class KbApiClient {
      * - 更新：传 updateFileId → 自动创建新版本
      */
     uploadContent(params: UploadContentParams): Promise<ApiResult<UploadContentResult>>;
+    /** 预检分片 MD5，支持秒传 */
+    getSliceIdByMd5V2(md5: string, size: number, suffix?: string): Promise<ApiResult<SliceCheckResult>>;
+    /** 注册已物理上传的分片 */
+    uploadFileSliceV2(params: UploadFileSliceParams): Promise<ApiResult<number>>;
+    /** 合并所有分片生成 resourceId */
+    saveResource(params: SaveResourceParams): Promise<ApiResult<number>>;
+    /** 通过路径保存文件到项目（自动递归创建目录），返回 fileId */
+    saveFileByPath(params: SaveFileToProjectParams): Promise<ApiResult<number>>;
+    /** 通过父目录 ID 保存文件到项目，返回 fileId */
+    saveFileByParentId(params: SaveFileToProjectParams): Promise<ApiResult<number>>;
+    /** 上传新文件内容以更新文件版本，返回 fileId */
+    updateFileVersion(params: UpdateFileVersionParams): Promise<ApiResult<number>>;
     /** 删除文件 */
     deleteFile(fileId: string): Promise<ApiResult<boolean>>;
     /** 显式创建空目录（4.24） */
