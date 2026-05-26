@@ -17,7 +17,9 @@
 
 ---
 
-## 二、首次安装（约 5 分钟）
+## 二、首次安装（约 3 分钟）
+
+安装阶段**无需**填写 AppKey、本地路径或任何 mapping。克隆、安装依赖、启动即可；所有业务配置在 **Web 管理控制台** 中完成。
 
 ### 1. 克隆仓库
 
@@ -39,41 +41,7 @@ cd openclaw-xgkb-sync
 npm install
 ```
 
-### 3. 创建配置文件
-
-**Linux / macOS：**
-
-```bash
-cp config.example.json config.json
-```
-
-**Windows（PowerShell）：**
-
-```powershell
-Copy-Item config.example.json config.json
-```
-
-**Windows（CMD）：**
-
-```cmd
-copy config.example.json config.json
-```
-
-> 若跳过此步，首次启动也会自动生成默认 `config.json`，但仍需自行填写 AppKey 与 mapping。
-
-### 4. 编辑 `config.json`（至少完成以下项）
-
-| 字段 | 说明 |
-|------|------|
-| `appKey` | 玄关 Open API 密钥（全局）；或在每条 `mappings[].appKey` 单独配置 |
-| `mappings[].mappingId` | 映射唯一 ID |
-| `mappings[].localRoot` | 本地目录**绝对路径** |
-| `mappings[].remoteRootFolderPath` | 知识库内远端路径，如 `宋培众/0518` |
-| `mappings[].enabled` | 设为 `true` 才会参与同步 |
-
-`serverUrl` 可省略，默认使用生产环境地址。
-
-### 5. 编译并启动
+### 3. 编译并启动
 
 **生产运行（推荐）：**
 
@@ -88,18 +56,24 @@ npm start
 npm run dev
 ```
 
-指定配置文件路径：
+指定配置文件路径（可选，默认 `./config.json`）：
 
 ```bash
 node dist/index.js --config D:\path\to\config.json
 ```
 
-### 6. 验证安装成功
+> **关于 `config.json`**  
+> - 首次启动时若不存在，服务会**自动生成**默认 `config.json`（含全局默认值、`mappings: []`，**不含** AppKey）。  
+> - **不必**手动 `cp config.example.json config.json`；若你已有自定义 `config.json`，启动时会保留其中已填内容。  
+> - 控制台若出现 `请在 Web 控制台补充 AppKey 与同步映射`，表示已进入「零配置安装」模式，属正常现象。
+
+### 4. 验证服务已启动
 
 控制台应出现类似：
 
 - `[OpenClaw Sync] 服务已启动`
 - `[ManagementApi] 已启动，监听 http://0.0.0.0:9090`
+- `[OpenClaw Sync] mapping 数量: 0（已启用: 0）`（首次安装时 mapping 为空是正常的）
 
 **健康检查：**
 
@@ -115,11 +89,49 @@ curl.exe http://127.0.0.1:9090/health
 
 期望返回 JSON 且 `"ok": true`。
 
-**Web 控制台：** 浏览器打开 <http://127.0.0.1:9090/>，在「同步映射」中确认 mapping 已配置，点击「全部同步」测试。
+---
+
+## 三、首次配置（Web 管理控制台）
+
+浏览器打开 **<http://127.0.0.1:9090/>**（若 `managementHost` 为 `0.0.0.0`，本机请用 `127.0.0.1`）。
+
+### 1. 全局配置（「全局配置」标签页）
+
+| 步骤 | 操作 |
+|------|------|
+| 知识库 API 地址 | 默认已填生产环境地址；私有部署时再改 `serverUrl` |
+| 全局 AppKey | 填写玄关 Open API 密钥，点击 **「保存配置」** |
+| 同步方向 / 间隔等 | 按需调整（默认双向、180 秒自动同步），保存后**立即热重载** |
+
+> AppKey 保存后在页面上以脱敏形式显示；要更换密钥需重新输入完整值再保存。
+
+### 2. 新增同步映射（「同步映射」标签页）
+
+点击 **「新增映射」**，至少填写：
+
+| 字段 | 说明 |
+|------|------|
+| 映射 ID | 可留空由系统自动生成，或自行指定唯一 ID |
+| 本地根目录 | 本地目录**绝对路径**（Agent 工作区） |
+| 远端目录路径 | 知识库内路径，如 `宋培众/0518` |
+| AppKey | 若未配置全局 AppKey，**本条 mapping 必须填写**独立 AppKey |
+| 启用 | 勾选后才会参与同步 |
+
+保存 mapping 后配置会写入 `config.json` 并**自动热重载**，一般无需重启进程。
+
+### 3. 试跑同步
+
+- 在 mapping 卡片上点击 **「同步」**，或工具栏 **「全部同步」**
+- 切换到 **「运行状态」** 查看 `lastSuccessAt`、错误信息、统计摘要
+
+### 4. 可选：仍用手动编辑 `config.json`
+
+Web 控制台与管理 API 的修改都会写回 `config.json`。高级用户可直接编辑文件后，在控制台点击 **「重载配置」** 或调用 `POST /reload`。  
+模板参考：[config.example.json](../config.example.json)。
 
 ---
 
-## 三、已有环境更新
+## 四、已有环境更新
 
 更新代码时**不要覆盖**本地 `config.json` 和 SQLite 状态库（默认 `./openclaw-sync-state.db`），否则会丢失密钥与同步水位。
 
@@ -151,7 +163,7 @@ npm start
 |--------|-------------|
 | 服务存活 | `curl http://127.0.0.1:9090/health` |
 | 配置仍有效 | Web 控制台「同步映射」或 `GET /mappings` |
-| 热重载配置（若只改了 config） | `POST http://127.0.0.1:9090/reload` 或控制台「重载配置」 |
+| 热重载配置（若只改了 config） | 控制台「重载配置」或 `POST /reload` |
 | 试跑同步 | 控制台「全部同步」或 `POST /sync` |
 
 > 升级后**首次同步**可能触发一次全量对账（略慢），属正常现象。大目录可在低峰期更新。
@@ -176,17 +188,16 @@ git stash pop                             # 若有 stash
 
 ---
 
-## 四、Windows 一键速查
+## 五、Windows 一键速查
 
 ```powershell
-# 首次安装
+# 首次安装（无需事先编辑 config.json）
 git clone https://github.com/xgjk/openclaw-xgkb-sync.git
 cd openclaw-xgkb-sync
 npm install
-Copy-Item config.example.json config.json
-# 用编辑器修改 config.json
 npm run build
 npm start
+# 浏览器打开 http://127.0.0.1:9090/ → 全局配置填 AppKey → 新增映射 → 同步
 
 # 更新
 cd openclaw-xgkb-sync
@@ -199,7 +210,7 @@ npm start
 
 ---
 
-## 五、后台常驻（可选）
+## 六、后台常驻（可选）
 
 本仓库未内置 systemd/PM2 配置，可按环境自选：
 
@@ -234,23 +245,25 @@ node dist/index.js --no-log-file
 
 ---
 
-## 六、常见问题
+## 七、常见问题
 
 | 现象 | 处理 |
 |------|------|
 | `node -v` 低于 18 | 安装 Node 18+ LTS |
 | 启动报 `no such column: local_ino` | 使用最新代码并重启；旧库会自动迁移列 |
-| `mappingCount: 0` | 在 `config.json` 或 Web 控制台添加至少一条 mapping |
-| 同步失败 / AppKey | 确认全局或 mapping 级 `appKey` 非空 |
-| 更新后行为异常 | 查看控制台 `[KbApi] request#` 日志；必要时 `POST /reload` |
-| 端口 9090 被占用 | 修改 `config.json` 中 `managementPort` 后重启 |
+| `mapping 数量: 0` | **首次安装正常**；在 Web 控制台「新增映射」 |
+| 同步失败 / AppKey | 在「全局配置」或 mapping 中填写有效 AppKey 并保存 |
+| `POST /mappings` 报 AppKey 必填 | 全局与各 mapping 均无 AppKey 时无法创建 mapping；至少填一处 |
+| 更新后行为异常 | 查看 `logs/` 下 `[KbApi] request#` 日志；必要时点击「重载配置」 |
+| 端口 9090 被占用 | 在「全局配置」改 `managementPort` 后**重启进程**（该字段需重启才生效） |
+| 改了 `config.json` 未生效 | 控制台「重载配置」或 `POST /reload`（`managementPort` / `managementHost` 除外，需重启） |
 
 更多排错见 [README.md § 常见问题](../README.md)。
 
 ---
 
-## 七、相关文档
+## 八、相关文档
 
 - [README.md](../README.md) — 功能说明与配置参考
 - [MANAGEMENT_API.md](./MANAGEMENT_API.md) — HTTP API（脚本/自动化）
-- [config.example.json](../config.example.json) — 配置模板
+- [config.example.json](../config.example.json) — 配置字段说明（模板，安装时可不复制）
