@@ -3,7 +3,7 @@ import * as nodePath from 'path';
 import { LocalFsAdapter } from './localFs';
 import { RemoteFsAdapter } from './remoteFs';
 import { SyncStateDb } from './syncStateDb';
-import { detectLocalRenames } from './reconcileEngine';
+import { detectLocalRenames, releaseContentChangedRenameTargets } from './reconcileEngine';
 import {
   FileState,
   FolderState,
@@ -29,8 +29,9 @@ import {
   MOVE_FILE_CONFLICT,
   UPLOAD_CONCURRENCY,
 } from './constants';
-import { pathsShadowedByAncestorFiles, sanitizePathSegment } from './pathSanitize';
+import { pathsShadowedByAncestorFiles, sanitizePathSegment, canonicalizeRelativeSyncPath } from './pathSanitize';
 import { moveToTrash, cleanupTrash } from './trashBin';
+import { FileIndexService } from './fileIndexService';
 
 type ProgressCallback = (msg: string) => void;
 
@@ -80,6 +81,8 @@ export class SyncEngine {
   private readonly excludePatterns: string[];
   private readonly downloadConcurrency: number;
   private readonly uploadConcurrency: number;
+  /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
+  private pullLocalTouchPaths = new Set<string>();
 
   constructor(
     localFs: LocalFsAdapter,
@@ -110,6 +113,21 @@ export class SyncEngine {
     return micromatch.isMatch(path, this.filePatterns);
   }
 
+  /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */
+  getPullLocalTouchPaths(): string[] {
+    return [...this.pullLocalTouchPaths];
+  }
+
+  private notePullLocalTouch(...paths: (string | undefined)[]): void {
+    const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+    if (syncDir === 'push') return;
+    for (const p of paths) {
+      if (!p) continue;
+      const key = canonicalizeRelativeSyncPath(p);
+      if (key) this.pullLocalTouchPaths.add(key);
+    }
+  }
+
   private emptyStats(): SyncStats {
     return {
       uploaded: 0,
@@ -136,11 +154,14 @@ export class SyncEngine {
   ): Promise<SyncStats> {
     this.stats = this.emptyStats();
     this.progress = onProgress ?? (() => undefined);
+    this.pullLocalTouchPaths.clear();
 
     const prog = (msg: string) => {
       console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
       this.progress(msg);
     };
+
+    await this.runFileIndexConsume(prog);
 
     prog('扫描本地文件...');
     const [localFiles, localDirs] = await Promise.all([
@@ -194,6 +215,17 @@ export class SyncEngine {
 
       consumedFromPaths = cfp;
       consumedToPaths = ctp;
+
+      const contentChangedAfterRename = releaseContentChangedRenameTargets(
+        localMap,
+        renamePlans,
+        consumedToPaths,
+      );
+      if (contentChangedAfterRename > 0) {
+        prog(
+          `inode 对账：${contentChangedAfterRename} 项 rename 同时有内容变更，仍参与 Phase2 上传`,
+        );
+      }
 
       if (renamePlans.length > 0) {
         const dirPlans = renamePlans.filter((p) => p.isDirectory);
@@ -283,6 +315,7 @@ export class SyncEngine {
         this.stats.skipped += totalPaths;
         await this.pruneRemoteEmptyDirectories(prog, localDirs);
         prog(`增量无变化（远端0变更，本地无新增/修改/删除），跳过决策，共跳过 ${totalPaths} 个路径`);
+        await this.runFileIndexPublish(prog);
         return this.stats;
       }
       prog(`远端0变更，但本地有变化（new=${hasLocalNew} mod=${hasLocalModified} del=${hasLocalDeleted}），继续决策`);
@@ -354,7 +387,40 @@ export class SyncEngine {
         ` 重命名:${this.stats.renamed ?? 0} 移动:${this.stats.moved ?? 0}` +
         ` 空目录清理:${this.stats.prunedRemoteDirs ?? 0} fail:${this.stats.failed} skip:${this.stats.skipped}`,
     );
+    await this.runFileIndexPublish(prog);
     return this.stats;
+  }
+
+  /** enableFileIndex + pull/bidirectional：同步开始前 consume 索引 */
+  private async runFileIndexConsume(prog: ProgressCallback): Promise<void> {
+    if (!this.mapping.enableFileIndex) return;
+    const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+    if (syncDir !== 'pull' && syncDir !== 'bidirectional') return;
+    try {
+      prog('拉取映射索引文件...');
+      await new FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).consumeIndex();
+    } catch (e) {
+      this.warnFileIndex('consume', e);
+    }
+  }
+
+  /** enableFileIndex + push/bidirectional + 主 sync 无失败：同步成功后 publish 索引 */
+  private async runFileIndexPublish(prog: ProgressCallback): Promise<void> {
+    if (!this.mapping.enableFileIndex) return;
+    if (this.stats.failed > 0) return;
+    const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+    if (syncDir !== 'push' && syncDir !== 'bidirectional') return;
+    try {
+      prog('发布映射索引文件...');
+      await new FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).publishIndex();
+    } catch (e) {
+      this.warnFileIndex('publish', e);
+    }
+  }
+
+  private warnFileIndex(phase: string, e: unknown): void {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[FileIndex][${this.mapping.mappingId}] ${phase} unexpected error: ${msg}`);
   }
 
   /**
@@ -1380,6 +1446,7 @@ export class SyncEngine {
   }
 
   private async doDownloadNew(path: string, remote: RemoteFileEntry): Promise<void> {
+    this.notePullLocalTouch(path);
     const body = await this.fetchContent(remote.remoteFileId);
     const actualMtime = await this.localFs.writeFile(path, body);
 
@@ -1405,6 +1472,7 @@ export class SyncEngine {
     remote: RemoteFileEntry,
     record: FileState | undefined,
   ): Promise<void> {
+    this.notePullLocalTouch(path);
     const body = await this.fetchContent(remote.remoteFileId);
     const actualMtime = await this.localFs.writeFile(path, body);
 
@@ -1471,6 +1539,7 @@ export class SyncEngine {
       }
 
       await this.localFs.rename(oldPath, newPath);
+      this.notePullLocalTouch(oldPath, newPath);
 
       this.db.deleteFileState(this.mapping.mappingId, oldPath);
       this.db.upsertFileState({
@@ -1529,6 +1598,14 @@ export class SyncEngine {
 
       await this.localFs.rename(oldPath, newPath);
 
+      for (const r of this.db.getAllFileStates(this.mapping.mappingId)) {
+        const p = r.localPath;
+        if (p === oldPath || p.startsWith(`${oldPath}/`)) {
+          this.notePullLocalTouch(p, `${newPath}${p.slice(oldPath.length)}`);
+        }
+      }
+      this.notePullLocalTouch(oldPath, newPath);
+
       // 批量更新 sync_file_state 中该目录前缀下的所有文件路径
       this.db.renameFilePaths(this.mapping.mappingId, oldPath, newPath);
       // 批量更新 sync_folder_state 中该目录前缀下的所有文件夹路径
@@ -1556,6 +1633,7 @@ export class SyncEngine {
   }
 
   private async doDeleteLocal(path: string, record: FileState): Promise<void> {
+    this.notePullLocalTouch(path);
     const absPath = this.localFs.resolve(path);
     await moveToTrash(absPath, this.mapping.mappingId, path);
     this.db.deleteFileState(this.mapping.mappingId, path);
@@ -1628,8 +1706,8 @@ export class SyncEngine {
       this.db.upsertFileState({
         ...rec,
         localPath: newPath,
-        // updateFileName 不会改变文件的 remoteFileId / remoteFolderId
-        remoteMtime: result.value.updateTime ?? rec.remoteMtime,
+        // updateFileName 不会改变文件的 remoteFileId / remoteFolderId / 内容 mtime 基线
+        remoteMtime: rec.remoteMtime,
         remoteRelativePath: newPath,
         syncStatus: 'done',
         lastSyncAt: now,
@@ -1698,8 +1776,9 @@ export class SyncEngine {
       ...record,
       localPath: toPath,
       remoteFileId: String(result.value.fileId),
-      localMtime: local?.mtime ?? record.localMtime,
-      remoteMtime: result.value.updateTime ?? record.remoteMtime,
+      // 保留 rename 前的 mtime 基线，供 Phase2 检测同轮内容变更
+      localMtime: record.localMtime,
+      remoteMtime: record.remoteMtime,
       localDev: local?.dev ?? record.localDev,
       localIno: local?.ino ?? record.localIno,
       remoteRelativePath: finalPath,
@@ -1822,8 +1901,8 @@ export class SyncEngine {
       localPath: toPath,
       remoteFileId: finalFileId,
       remoteFolderId: finalParentId,
-      localMtime: local?.mtime ?? record.localMtime,
-      remoteMtime: mv.updateTime ?? (mv.idChanged ? now + MTIME_TOLERANCE_MS : record.remoteMtime),
+      localMtime: record.localMtime,
+      remoteMtime: record.remoteMtime,
       localDev: local?.dev ?? record.localDev,
       localIno: local?.ino ?? record.localIno,
       remoteRelativePath: finalRelativePath,
@@ -1965,7 +2044,7 @@ export class SyncEngine {
         localPath: newPath,
         remoteFileId: mappedRemoteId,
         remoteFolderId: mappedFolderId,
-        remoteMtime: mv.updateTime ?? rec.remoteMtime,
+        remoteMtime: rec.remoteMtime,
         remoteRelativePath: newPath,
         syncStatus: 'done',
         lastSyncAt: now,

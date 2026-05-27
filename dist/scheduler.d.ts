@@ -1,4 +1,4 @@
-import { SyncConfig } from './types';
+import { SyncConfig, SyncTriggerReason } from './types';
 export declare function resolveMaxConcurrentMappings(config: SyncConfig): number;
 /**
  * 多 Mapping 同步调度器
@@ -14,6 +14,7 @@ export declare class SyncScheduler {
     private readonly runStates;
     private readonly mappingQueue;
     private readonly queuedMappingIds;
+    private readonly watchers;
     private timers;
     private activeMappingRuns;
     private running;
@@ -27,6 +28,8 @@ export declare class SyncScheduler {
     start(): void;
     /** 停止调度器，清理定时器和数据库连接 */
     stop(): void;
+    private startWatchers;
+    private stopWatchers;
     /** 手动触发指定 mapping 同步 */
     triggerMapping(mappingId: string): void;
     /** 触发所有已启用 mapping */
@@ -49,6 +52,9 @@ export declare class SyncScheduler {
     getStatus(): Record<string, {
         isSyncing: boolean;
         pendingSync: boolean;
+        lastTriggerReason?: SyncTriggerReason;
+        lastWatchTriggerAt?: number;
+        watchActive: boolean;
         lastState: unknown;
     }>;
 }

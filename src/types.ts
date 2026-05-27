@@ -53,7 +53,25 @@ export interface SyncMapping {
    * 默认 'local-wins'。
    */
   conflictStrategy?: 'local-wins' | 'remote-wins';
+  /**
+   * 是否启用路径→remoteFileId 索引文件（`.openclaw-sync-map.json`）独立同步。
+   * push/bidirectional 在同步成功后 publish；pull/bidirectional 在同步开始前 consume。
+   * 默认 false。
+   */
+  enableFileIndex?: boolean;
+  /**
+   * 是否启用 chokidar 监听本地变更并触发 push（覆盖全局）。
+   * 仅 syncDirection 为 push/bidirectional 时生效；pull-only 忽略。
+   */
+  watchEnabled?: boolean;
+  /** watch debounce（毫秒），覆盖全局 pushDebounceMs */
+  pushDebounceMs?: number;
+  /** NFS/Docker 等环境改用 chokidar 轮询模式 */
+  watchUsePolling?: boolean;
 }
+
+/** 同步触发来源（日志与诊断） */
+export type SyncTriggerReason = 'watch' | 'timer' | 'startup' | 'manual';
 
 export interface SyncConfig {
   /** 知识库 Open API 根地址；省略时使用生产环境默认地址（见 constants.DEFAULT_SERVER_URL） */
@@ -78,7 +96,7 @@ export interface SyncConfig {
   /** 手动模式下的最大并发 mapping 数量，默认 2 */
   maxConcurrentMappings?: number;
   /**
-   * API 限速：每分钟最大请求数（令牌桶稳态速率），默认 60。
+   * API 限速：每分钟最大请求数（令牌桶稳态速率），默认 180。
    * 多台服务器共享同一知识库时，建议各自降低此值（如 30）以避免聚合超限。
    */
   maxRequestsPerMinute?: number;
@@ -114,6 +132,15 @@ export interface SyncConfig {
    * 注意做好网络隔离，勿在公网暴露。
    */
   managementHost?: string;
+  /**
+   * 是否启用 chokidar 监听本地变更并触发 push，默认 true。
+   * push 场景下 autoSyncIntervalSec 退化为兜底；pull-only mapping 不启 watch。
+   */
+  watchEnabled?: boolean;
+  /** watch debounce（毫秒），默认 1500 */
+  pushDebounceMs?: number;
+  /** watch 不可靠环境改用轮询，默认 false */
+  watchUsePolling?: boolean;
   mappings: SyncMapping[];
 }
 
@@ -190,6 +217,10 @@ export interface ListChangesResponse {
 export interface ListDescendantFilesParams {
   rootFileId: string;
   projectId?: string;
+  /**
+   * 文件后缀过滤。不传时 KB 默认 `md`。
+   * 支持：`md` | `md,png,pdf`（逗号分隔多后缀）| `*`（全部类型）。
+   */
   suffix?: string;
   limit?: number;
   cursor?: string;
@@ -467,6 +498,19 @@ export interface MappingState {
   resolvedRootFileId?: string | null;
   /** 自动解析或手动配置的 projectId 缓存 */
   resolvedProjectId?: string | null;
+  /** 索引文件 `.openclaw-sync-map.json` 在 KB 上的 fileId（Pull consume 加速） */
+  indexFileRemoteId?: string | null;
+  /** 上次成功 publish 的索引 JSON 内容 hash（SHA256 hex） */
+  indexContentHash?: string | null;
+}
+
+/** 映射索引 JSON 文档（根目录全量表） */
+export interface FileIndexDocument {
+  version: number;
+  mappingId: string;
+  updatedAt: string;
+  fileCount: number;
+  files: Record<string, string>;
 }
 
 export interface FileState {

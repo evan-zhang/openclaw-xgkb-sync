@@ -41,6 +41,7 @@ const child_process_1 = require("child_process");
 const scheduler_1 = require("./scheduler");
 const config_1 = require("./config");
 const managementApiCredentials_1 = require("./managementApiCredentials");
+const watchHelpers_1 = require("./watchHelpers");
 /** 读取 package.json 里的版本号，失败则返回 'unknown' */
 function readVersion() {
     try {
@@ -98,6 +99,9 @@ const EDITABLE_CONFIG_FIELDS = [
     'startupJitterMaxSec',
     'managementPort',
     'managementHost',
+    'watchEnabled',
+    'pushDebounceMs',
+    'watchUsePolling',
 ];
 /**
  * HTTP 管理 API 服务
@@ -277,6 +281,12 @@ class ManagementApi {
                 localRoot: mapping?.localRoot,
                 remoteRootFolderPath: mapping?.remoteRootFolderPath,
                 syncDirection: mapping?.syncDirection ?? config.syncDirection,
+                watchEnabledEffective: mapping
+                    ? (0, watchHelpers_1.resolveWatchEnabled)(mapping, config)
+                    : false,
+                watchActive: state.watchActive,
+                lastTriggerReason: state.lastTriggerReason ?? null,
+                lastWatchTriggerAt: state.lastWatchTriggerAt ?? null,
                 isSyncing: state.isSyncing,
                 pendingSync: state.pendingSync,
                 lastState: state.lastState,
@@ -293,6 +303,9 @@ class ManagementApi {
                 syncDirection: config.syncDirection,
                 autoSyncIntervalSec: config.autoSyncIntervalSec,
                 fullReconcileIntervalSec: config.fullReconcileIntervalSec,
+                watchEnabled: config.watchEnabled,
+                pushDebounceMs: config.pushDebounceMs,
+                watchUsePolling: config.watchUsePolling,
                 maxConcurrentMappings: config.maxConcurrentMappings,
                 maxConcurrentMappingsMode: config.maxConcurrentMappingsMode,
                 effectiveMaxConcurrentMappings: (0, scheduler_1.resolveMaxConcurrentMappings)(config),
@@ -661,6 +674,20 @@ class ManagementApi {
                     raw[key] = val;
                     continue;
                 }
+                if (key === 'pushDebounceMs') {
+                    if (typeof val !== 'number' || val < 100) {
+                        throw new Error('pushDebounceMs 必须是 >= 100 的数字');
+                    }
+                    raw.pushDebounceMs = val;
+                    continue;
+                }
+                if (key === 'watchEnabled' || key === 'watchUsePolling') {
+                    if (typeof val !== 'boolean') {
+                        throw new Error(`${key} 必须是 boolean`);
+                    }
+                    raw[key] = val;
+                    continue;
+                }
                 if (key === 'maxConcurrentMappingsMode') {
                     if (val !== 'auto' && val !== 'manual') {
                         throw new Error('maxConcurrentMappingsMode 必须是 auto | manual');
@@ -715,7 +742,7 @@ class ManagementApi {
             total: config.mappings.length,
             /** 根级全局 appKey 是否已配置（非空）。为 false 时，新建/更新 mapping 必须在请求体中带非空 appKey，见 docs/MANAGEMENT_API.md */
             hasGlobalAppKey: !!(config.appKey && config.appKey.trim()),
-            mappings: config.mappings.map((m) => this.mappingSummary(m)),
+            mappings: config.mappings.map((m) => this.mappingSummary(m, config)),
         });
     }
     async handleCreateMapping(req, res) {
@@ -992,7 +1019,8 @@ class ManagementApi {
         });
     }
     /** 隐藏 appKey 敏感字段的 mapping 摘要 */
-    mappingSummary(m) {
+    mappingSummary(m, config) {
+        const cfg = config ?? this.opts.getScheduler().getConfig();
         return {
             mappingId: m.mappingId,
             enabled: m.enabled,
@@ -1006,6 +1034,13 @@ class ManagementApi {
             excludePatterns: m.excludePatterns,
             moveNameConflictStrategy: m.moveNameConflictStrategy,
             renameNameConflictStrategy: m.renameNameConflictStrategy,
+            enableFileIndex: m.enableFileIndex,
+            watchEnabled: m.watchEnabled,
+            pushDebounceMs: m.pushDebounceMs,
+            watchUsePolling: m.watchUsePolling,
+            watchEnabledEffective: (0, watchHelpers_1.resolveWatchEnabled)(m, cfg),
+            effectivePushDebounceMs: (0, watchHelpers_1.resolvePushDebounceMs)(m, cfg),
+            effectiveWatchUsePolling: (0, watchHelpers_1.resolveWatchUsePolling)(m, cfg),
         };
     }
     // ==================== 工具方法 ====================
@@ -1029,6 +1064,9 @@ class ManagementApi {
             startupJitterMaxSec: config.startupJitterMaxSec,
             managementPort: config.managementPort,
             managementHost: config.managementHost,
+            watchEnabled: config.watchEnabled,
+            pushDebounceMs: config.pushDebounceMs,
+            watchUsePolling: config.watchUsePolling,
         };
     }
     serveStaticFile(res, relativePath) {

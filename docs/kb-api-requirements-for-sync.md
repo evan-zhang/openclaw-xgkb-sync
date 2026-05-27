@@ -1,8 +1,8 @@
 # 知识库 Open API 实现说明（双向文件同步 · v2）
 
-> **读者**：同步客户端 / Open API / 联调测试  
-> **来源**：[openclaw-xgkb-sync](https://github.com/xgjk/openclaw-xgkb-sync) 独立同步进程  
-> **版本**：v2（2026-05）— 以 **docdb `document-database` + open-api 透传** 为准  
+> **读者**：同步客户端 / Open API / 联调测试
+> **来源**：[openclaw-xgkb-sync](https://github.com/xgjk/openclaw-xgkb-sync) 独立同步进程
+> **版本**：v2（2026-05）— 以 **docdb `document-database` + open-api 透传** 为准
 > **状态**：P0 / P1 / P2 **均已落地**（分支 `feature/kb-sync-api-p0` 及后续提交）
 
 ---
@@ -42,7 +42,7 @@ Open API 路径前缀：`https://{域名}/open-api/document-database/file/...`�
 | 新增 | `updateFileName` | P0 | ✅ |
 | 新增 | `moveFile` | P0 | ✅ |
 | 修改 | `batchGetMeta`（`type`/`suffix`/`relativePath`/`contentHash`/`etag`） | P0 + P2 | ✅ |
-| 修改 | `listDescendantFiles`（`type`、`includeFolders`） | P0 | ✅ |
+| 修改 | `listDescendantFiles`（`type`、`includeFolders`、**`suffix` 多值/`*`**） | P0 + **待 KB** | 🔄 suffix 扩展中 |
 | 修改 | `listChanges`（`includePath`、`includeMoveHint`） | P1 | ✅ |
 | 新增 | `resolvePath` | P2 | ✅ |
 | 错误响应 | `Result.data.errorCode`（`SyncApiErrorVO`） | — | ✅ docdb 直连；经 open-api 时 **可能** 仅有 `resultCode`（如 `400001`） |
@@ -233,12 +233,23 @@ Open API 路径前缀：`https://{域名}/open-api/document-database/file/...`�
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `projectId` / `rootFileId` | 必填 | |
-| `suffix` | `md` | |
+| `suffix` | `md`（**不传时**） | 单后缀如 `md`；**多后缀**逗号分隔如 `md,png,pdf`；**`*`** 表示不过滤类型、返回全部文件 |
 | `limit` | 500，最大 2000 | |
 | `includePath` | false | true 时返回 `relativePath` |
 | `includeFolders` | **false** | false：仅文件（与现网一致）；true：含文件夹，项带 **`type`** |
 
 响应 `files[]`：`fileId`、`parentId`、`name`、`type`、`size`、`updateTime`、`relativePath?`。
+
+**suffix 扩展（KB 待上线，同步端已按此传参）**：
+
+| 传值 | 行为 |
+|------|------|
+| 省略 | 仅 `md`（**同步端避免省略**，始终显式传 suffix） |
+| `md` | 仅 md |
+| `md,png,pdf` | 上述后缀并集 |
+| `*` | 不过滤，返回全部类型 |
+
+同步端 `buildListDescendantFilesSuffix(filePatterns)` 规则：单一 `**\/*.ext` → 该 ext；多个 ext → 逗号拼接；无法推断（如 `**\/*`）→ `*`。
 
 ---
 

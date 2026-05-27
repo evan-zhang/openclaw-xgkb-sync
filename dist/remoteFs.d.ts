@@ -76,7 +76,8 @@ export declare class RemoteFsAdapter {
     private resolvePathFromFileId;
     /**
      * Full remote listing via paginated listDescendantFiles.
-     * suffix is inferred from filePatterns for API-side filtering; complex patterns are filtered locally.
+     * suffix is inferred from filePatterns (single ext / comma-separated / `*`);
+     * client-side filePatterns filtering always applied afterward.
      */
     listFiles(): Promise<ApiResult<RemoteFileEntry[]>>;
     /**
@@ -114,6 +115,21 @@ export declare class RemoteFsAdapter {
     deleteFile(remoteFileId: string): Promise<ApiResult<void>>;
     /** 查询远端目录的直接子项（文件+子目录），用于安全检查目录是否为空 */
     getChildFiles(folderId: string): Promise<ApiResult<FileListItem[]>>;
+    /**
+     * 在指定目录的直接子项中按文件名查找文件（type≠1）的 fileId。
+     * 用于 Pull 端 consume 索引冷启动 locate。
+     */
+    findDirectChildFileId(parentFolderId: string, fileName: string): Promise<ApiResult<string | null>>;
+    /** uploadContent 封装（自动注入 projectId） */
+    uploadTextContent(params: {
+        content: string;
+        fileName: string;
+        fileSuffix?: string;
+        folderName?: string;
+        updateFileId?: string;
+    }): Promise<ApiResult<{
+        fileId: string | number;
+    }>>;
     /**
      * 后序清理远端空目录。
      * - 不删除 mapping 根目录自身；

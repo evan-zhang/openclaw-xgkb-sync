@@ -16,9 +16,9 @@ import {
 } from './types';
 import {
   BATCH_GET_META_MAX,
+  buildListDescendantFilesSuffix,
   DEFAULT_FILE_PATTERNS,
   DOWNLOAD_CONCURRENCY,
-  extractUniqueSuffix,
   mergeDefaultExcludePatterns,
 } from './constants';
 import { canonicalizeRelativeSyncPath, sanitizePathSegment } from './pathSanitize';
@@ -318,18 +318,16 @@ export class RemoteFsAdapter {
 
   /**
    * Full remote listing via paginated listDescendantFiles.
-   * suffix is inferred from filePatterns for API-side filtering; complex patterns are filtered locally.
+   * suffix is inferred from filePatterns (single ext / comma-separated / `*`);
+   * client-side filePatterns filtering always applied afterward.
    */
   async listFiles(): Promise<ApiResult<RemoteFileEntry[]>> {
     const entries: RemoteFileEntry[] = [];
     let cursor: string | undefined;
     let page = 0;
 
-    // Infer API suffix from filePatterns.
-    const apiSuffix = extractUniqueSuffix(this.filePatterns);
-    console.log(
-      `[RemoteFs] listDescendantFiles API suffix=${apiSuffix ?? 'none'}`,
-    );
+    const apiSuffix = buildListDescendantFilesSuffix(this.filePatterns);
+    console.log(`[RemoteFs] listDescendantFiles API suffix=${apiSuffix}`);
 
     do {
       page++;
@@ -548,6 +546,38 @@ export class RemoteFsAdapter {
   /** 查询远端目录的直接子项（文件+子目录），用于安全检查目录是否为空 */
   async getChildFiles(folderId: string): Promise<ApiResult<FileListItem[]>> {
     return this.api.getChildFiles(folderId);
+  }
+
+  /**
+   * 在指定目录的直接子项中按文件名查找文件（type≠1）的 fileId。
+   * 用于 Pull 端 consume 索引冷启动 locate。
+   */
+  async findDirectChildFileId(
+    parentFolderId: string,
+    fileName: string,
+  ): Promise<ApiResult<string | null>> {
+    const r = await this.api.getChildFiles(parentFolderId);
+    if (!r.ok) return { ok: false, error: r.error };
+    const item = (r.value ?? []).find((c) => c.name === fileName && c.type !== 1);
+    return { ok: true, value: item != null ? String(item.id) : null };
+  }
+
+  /** uploadContent 封装（自动注入 projectId） */
+  async uploadTextContent(params: {
+    content: string;
+    fileName: string;
+    fileSuffix?: string;
+    folderName?: string;
+    updateFileId?: string;
+  }): Promise<ApiResult<{ fileId: string | number }>> {
+    return this.api.uploadContent({
+      content: params.content,
+      fileName: params.fileName,
+      fileSuffix: params.fileSuffix,
+      folderName: params.folderName,
+      updateFileId: params.updateFileId,
+      projectId: this.resolvedProjectId!,
+    });
   }
 
   /**

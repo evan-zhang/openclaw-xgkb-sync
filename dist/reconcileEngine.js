@@ -1,11 +1,43 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.releaseContentChangedRenameTargets = releaseContentChangedRenameTargets;
 exports.detectLocalRenames = detectLocalRenames;
+const constants_1 = require("./constants");
 /**
  * 本地 inode 对账入口：
  * 1. 先通过文件夹自身 inode 检测目录级 rename/move
  * 2. 再检测剩余单文件 rename/move（未被目录计划消费的文件）
  */
+/**
+ * rename/move 成功后路径会进入 consumedToPaths 以跳过 Phase2 路径对账。
+ * 若同轮还改了文件内容，需从 consumedToPaths 移除，以便 Phase2 执行 upload-update。
+ */
+function releaseContentChangedRenameTargets(localMap, renamePlans, consumedToPaths) {
+    let released = 0;
+    for (const plan of renamePlans) {
+        if (plan.isDirectory && plan.affectedRecords?.length) {
+            const oldDir = plan.directoryOldPath ?? '';
+            const newDir = plan.directoryNewPath ?? '';
+            for (const rec of plan.affectedRecords) {
+                const suffix = pathSuffixUnderDir(rec.localPath, oldDir);
+                const newPath = newDir ? `${newDir}/${suffix}` : suffix;
+                const local = localMap.get(newPath);
+                if (local && local.mtime > (rec.localMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS) {
+                    if (consumedToPaths.delete(newPath))
+                        released++;
+                }
+            }
+        }
+        else if (plan.path && plan.record) {
+            const local = plan.local ?? localMap.get(plan.path);
+            if (local && local.mtime > (plan.record.localMtime ?? 0) + constants_1.MTIME_TOLERANCE_MS) {
+                if (consumedToPaths.delete(plan.path))
+                    released++;
+            }
+        }
+    }
+    return released;
+}
 function detectLocalRenames(localFiles, localDirs, dbRecords, folderRecords, folderPathToRemoteId) {
     // 构建 inode → 当前本地文件 的映射
     const inodeToEntry = new Map();

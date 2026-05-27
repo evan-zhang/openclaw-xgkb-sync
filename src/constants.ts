@@ -91,7 +91,7 @@ export const UPLOAD_CONCURRENCY = 3;
 export const EXECUTE_BATCH_PAUSE_MS = 300;
 
 /** 默认每分钟最大 API 请求数（令牌桶稳态速率） */
-export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 60;
+export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 180;
 
 /** 默认令牌桶突发容量 */
 export const DEFAULT_RATE_LIMIT_BURST = 8;
@@ -319,6 +319,33 @@ export const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
 /** 版本备注 */
 export const VERSION_REMARK = 'OpenClaw Sync Agent';
 
+/** 映射索引文件名（mapping 根目录，全量 path→fileId 表） */
+export const FILE_INDEX_NAME = '.openclaw-sync-map.json';
+
+/** publish 索引 uploadContent 最大重试次数（与 MAX_RETRIES 一致） */
+export const FILE_INDEX_PUBLISH_MAX_RETRIES = MAX_RETRIES;
+
+/** consume 索引下载最大重试次数 */
+export const FILE_INDEX_CONSUME_MAX_RETRIES = 2;
+
+/** 本地文件监听默认开启（push/bidirectional） */
+export const DEFAULT_WATCH_ENABLED = true;
+
+/** watch 触发 sync 前的 debounce（毫秒） */
+export const DEFAULT_PUSH_DEBOUNCE_MS = 1500;
+
+/** watch 不可靠环境（NFS/Docker 卷）是否改用轮询 */
+export const DEFAULT_WATCH_USE_POLLING = false;
+
+/** awaitWriteFinish：文件大小稳定多久视为写入完成（毫秒） */
+export const WATCH_AWAIT_WRITE_STABILITY_MS = 300;
+
+/** awaitWriteFinish 轮询间隔（毫秒） */
+export const WATCH_AWAIT_WRITE_POLL_MS = 100;
+
+/** pull 写入结束后 ignoreSet 额外保留时间（毫秒），防止 resume 后 chokidar 迟到的 echo */
+export const WATCH_PULL_IGNORE_TAIL_MS = 200;
+
 /**
  * 清理知识库返回的正文（去除分页页脚等）。
  * raw 为 null/undefined 时返回空字符串。
@@ -328,22 +355,53 @@ export function cleanContent(raw: string | null | undefined): string {
   return raw.replace(/\n*Page \d+ of \d+\s*$/, '').trimEnd() + '\n';
 }
 
+/** filePatterns 末尾 `*.ext` 捕获组，用于推断 listDescendantFiles 的 suffix 参数 */
+const FILE_PATTERN_EXT_SUFFIX_RE = /\*\.([a-zA-Z0-9]+)$/;
+
 /**
- * 从 filePatterns 中提取唯一的文件扩展名，用于 API 级别的 suffix 过滤。
- * - 若所有 pattern 均为 `**\/*.ext` 形式且扩展名相同，返回该扩展名
- * - 否则返回 undefined（由调用方做客户端过滤）
+ * 判断 glob 是否表示「不限扩展名」（需传 suffix=*，避免不传时 KB 默认 md）。
+ */
+function isCatchAllFilePattern(pattern: string): boolean {
+  if (pattern === '**/*' || pattern === '*' || pattern === '**/**') return true;
+  // brace / negation 等 micromatch 复杂语法无法可靠推断扩展名
+  if (/[{[\]!]/.test(pattern)) return true;
+  // 如 `**/notes/*`：目录下所有文件，非单一 ext
+  if (/\/\*[^.]*$/.test(pattern) && !FILE_PATTERN_EXT_SUFFIX_RE.test(pattern)) return true;
+  return false;
+}
+
+/**
+ * 从 filePatterns 构造 listDescendantFiles 的 suffix 参数。
+ *
+ * KB 约定（待 KB 侧上线）：
+ * - 不传：默认仅 `md`（同步端应始终显式传 suffix，避免踩默认）
+ * - 单值：如 `md`
+ * - 多值：逗号分隔，如 `md,png,pdf`
+ * - `*`：不过滤类型，返回全部（客户端仍用 filePatterns 二次过滤）
  *
  * @example
- *   extractUniqueSuffix(['**\/*.md']) => 'md'
- *   extractUniqueSuffix(['**\/*.md', '**\/*.txt']) => undefined
- *   extractUniqueSuffix(['**\/*.md', '**\/subdir\/*.md']) => 'md'
+ *   buildListDescendantFilesSuffix(['**\/*.md']) => 'md'
+ *   buildListDescendantFilesSuffix(['**\/*.md', '**\/*.png']) => 'md,png'
+ *   buildListDescendantFilesSuffix(['**\/*']) => '*'
  */
-export function extractUniqueSuffix(patterns: string[]): string | undefined {
+export function buildListDescendantFilesSuffix(patterns: string[]): string {
+  if (patterns.length === 0) return '*';
+
   const suffixes = new Set<string>();
   for (const p of patterns) {
-    const m = p.match(/\*\.([a-zA-Z0-9]+)$/);
-    if (!m) return undefined; // 含有非扩展名的复杂 pattern，无法推断
+    if (isCatchAllFilePattern(p)) return '*';
+    const m = p.match(FILE_PATTERN_EXT_SUFFIX_RE);
+    if (!m) return '*';
     suffixes.add(m[1].toLowerCase());
   }
-  return suffixes.size === 1 ? [...suffixes][0] : undefined;
+
+  return [...suffixes].sort().join(',');
+}
+
+/** @deprecated 使用 buildListDescendantFilesSuffix */
+export function extractUniqueSuffix(patterns: string[]): string | undefined {
+  const suffix = buildListDescendantFilesSuffix(patterns);
+  if (suffix === '*') return undefined;
+  const parts = suffix.split(',');
+  return parts.length === 1 ? parts[0] : undefined;
 }

@@ -21,6 +21,7 @@ OpenClaw 节点与玄关知识库（XGKB）文件双向同步 Agent。
 | [config.example.json](./config.example.json) | 复制为 `config.json` 的配置模板 |
 | [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md) | 用 curl / 脚本 / AI 自动化增删改查 mapping 与全局配置 |
 | [docs/DESIGN.md](./docs/DESIGN.md) | 同步架构、增量策略、可靠性设计（非部署必读） |
+| [docs/sync-logic-reference-for-obsidian.md](./docs/sync-logic-reference-for-obsidian.md) | Obsidian 插件对照；含映射索引消费约定 |
 
 ### 部署前向用户确认的信息
 
@@ -108,6 +109,7 @@ curl.exe http://127.0.0.1:9090/health
 - **多 Mapping**：单节点可配置多条本地目录 ↔ 云端目录映射，每条独立配置方向与文件过滤
 - **按用户限速**：每个 `appKey` 独享令牌桶，多用户场景互不干扰
 - **Web 管理控制台**：浏览器访问 `/` 即可可视化增删改查 mapping 与全局配置
+- **映射索引（`enableFileIndex`）**：在 mapping 根目录独立同步 `.openclaw-sync-map.json`（`local_path → remoteFileId` 全量表），供 Pull 端 / Obsidian 按路径查 fileId，不参与普通文件对账
 - **HTTP 管理 API**：内置轻量 HTTP 服务，支持远程查看状态、触发同步、热重载配置（供 AI / 脚本调用）
 - **SQLite 状态库**：持久化同步水位与文件状态，无需外部依赖
 
@@ -161,12 +163,12 @@ npm run dev:config                   # 显式使用 ./config.json
 | `serverUrl` | 否 | `https://sg-al-cwork-web.mediportal.com.cn/open-api/` | 知识库 Open API 地址；省略时使用生产环境默认地址 |
 | `appKey` | 否 | — | **玄关开放平台**签发的 Open API 密钥（个人/应用 `appKey`）；可省略或留空。单条 mapping 未单独配置 `appKey` 时使用此值；**通过管理 API 新建/更新 mapping 时，若此处为空则必须在请求体中为该条提供非空 `appKey`**（见 [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md)）。**全局与各 mapping 均无有效密钥时，同步会失败** |
 | `syncDirection` | 否 | `bidirectional` | 全局同步方向：`bidirectional` / `push`（仅上传）/ `pull`（仅下载） |
-| `autoSyncIntervalSec` | 否 | `180` | 自动同步间隔（秒），`0` = 关闭定时同步 |
+| `autoSyncIntervalSec` | 否 | `180` | **全局唯一定时器**（秒），到点对每条 mapping 跑完整 `runSync()`；`0` = 关闭定时同步。角色因方向而异：pull 时为**拉取频率**；push/bidirectional 且开 watch 时为**兜底**（本地 push 主要靠监听）。详见下节「同步方向与参数生效关系」 |
 | `fullReconcileIntervalSec` | 否 | `3600` | 强制全量对账间隔（秒），用于修复 `listChanges` 或状态库漏记录；`0` = 关闭。升级后首次同步若尚无全量记录，会触发一次全量对账 |
 | `stateDbPath` | 否 | `./openclaw-sync-state.db` | SQLite 状态库路径 |
 | `maxConcurrentMappingsMode` | 否 | `auto` | mapping 并发策略：`auto` 按映射数量与 AppKey 分布自动适配；`manual` 使用下方 `maxConcurrentMappings` |
 | `maxConcurrentMappings` | 否 | `2` | 手动模式下的最大并发 mapping 数。`auto` 模式下通常为 1～5，详见调度器 `resolveMaxConcurrentMappings` |
-| `maxRequestsPerMinute` | 否 | `60` | 每 appKey 每分钟最大请求数（令牌桶稳态速率）。每个 `appKey` 独立计算，互不干扰 |
+| `maxRequestsPerMinute` | 否 | `180` | 每 appKey 每分钟最大请求数（令牌桶稳态速率）。每个 `appKey` 独立计算，互不干扰 |
 | `rateLimitBurst` | 否 | `8` | 令牌桶突发容量，允许短时间内连续发出最多 N 个请求后再按稳态补充 |
 | `rateLimitCooldownSec` | 否 | `60` | 收到限流响应（HTTP 429 或 resultCode 610012）后的冷却时间（秒） |
 | `downloadConcurrency` | 否 | `5` | 单次同步中并发下载文件数 |
@@ -174,6 +176,112 @@ npm run dev:config                   # 显式使用 ./config.json
 | `startupJitterMaxSec` | 否 | `20` | 启动后首次同步的随机抖动上限（秒）。多实例同时重启时分散请求，设为 `0` 禁用 |
 | `managementPort` | 否 | `9090` | HTTP 管理 API 监听端口，设为 `0` 禁用管理 API |
 | `managementHost` | 否 | `0.0.0.0` | HTTP 管理 API 监听地址；默认允许局域网访问，本机浏览器请用 `127.0.0.1`（注意防火墙） |
+| `watchEnabled` | 否 | `true` | push/bidirectional 是否启用 chokidar 本地文件监听；`false` 时仅依赖定时 sync |
+| `pushDebounceMs` | 否 | `1500` | 文件监听 debounce（毫秒），合并连续保存 |
+| `watchUsePolling` | 否 | `false` | **仅 watch 开启时有效**。chokidar 用轮询代替系统原生文件事件（NFS/Docker 卷）；不是「定时 sync」的替代品 |
+
+### 同步方向与参数生效关系
+
+`syncDirection` 决定 **sync 里允许哪些操作**（上传 / 下载 / rename）；watch 与 `autoSyncIntervalSec` 决定 **何时触发 sync**。二者独立但常一起配置。
+
+**触发源（每次 sync 都跑同一套 `runSync()`）：**
+
+| 触发源 | 适用方向 | 说明 |
+|--------|----------|------|
+| **watch**（`watchEnabled` + `pushDebounceMs`） | `push` / `bidirectional` | 本地文件变更 → 约 debounce 后 sync；**不感知远端变更** |
+| **定时器**（`autoSyncIntervalSec`） | 全部 | 全局间隔；`0` 关闭 |
+| 启动 / 手动 | 全部 | 管理 API 或 Web「全部同步」 |
+
+**`watchEnabled` 与 `watchUsePolling` 的区别：**
+
+| 字段 | 含义 |
+|------|------|
+| `watchEnabled` | **要不要**监听本地目录（总开关） |
+| `watchUsePolling` | **怎么**监听：默认 `false` 用 Windows/Linux 原生事件（快）；`true` 用 chokidar 轮询（NFS/Docker 卷更可靠，CPU 略高） |
+
+`watchEnabled: false` 时回退到 **定时 sync**，不是打开 `watchUsePolling`。
+
+**各参数在不同 `syncDirection` 下是否生效：**
+
+| 参数 | `push` | `pull` | `bidirectional` |
+|------|--------|--------|-----------------|
+| `watchEnabled` | ✅ 推荐开 | ❌ 强制无效 | ✅ 推荐开 |
+| `pushDebounceMs` | ✅ watch 开时 | ❌ | ✅ watch 开时 |
+| `watchUsePolling` | ✅ watch 开时 | ❌ | ✅ watch 开时 |
+| `autoSyncIntervalSec` | ✅ 兜底 | ✅ **唯一自动 pull** | ✅ pull 远端 + push 兜底 |
+| `uploadConcurrency` | ✅ | ⚪ 几乎不用 | ✅ |
+| `downloadConcurrency` | ⚪ 几乎不用 | ✅ | ✅ |
+| `moveNameConflictStrategy` / `renameNameConflictStrategy` | ✅ | ❌ 无远端 rename | ✅ |
+| `enableFileIndex` | ✅ publish | ✅ consume | ✅ consume + publish |
+
+> 全局与各 mapping 可分别设 `syncDirection`；mapping 留空则继承全局。Web 管理界面会按**有效方向**隐藏无效项，空字段显示推荐默认值。
+
+### 各模式推荐配置
+
+以下为单条 mapping 的常见场景（全局默认可与 mapping 一致）。**同一进程内多条 mapping 共用同一个 `autoSyncIntervalSec`**，混用 push 与 bidirectional 时需折中。
+
+#### `push` — OpenClaw 写本地 → 推知识库
+
+```json
+{
+  "syncDirection": "push",
+  "watchEnabled": true,
+  "pushDebounceMs": 1500,
+  "watchUsePolling": false,
+  "autoSyncIntervalSec": 1800,
+  "enableFileIndex": true,
+  "uploadConcurrency": 3
+}
+```
+
+- 本地保存：**watch** 约 1.5s 内上传
+- 定时 **1800s**：防 watch 漏事件（Docker 卷等可设 `watchUsePolling: true`）
+
+#### `pull` — Obsidian / Pull Agent 只收 KB 变更
+
+```json
+{
+  "syncDirection": "pull",
+  "autoSyncIntervalSec": 120,
+  "enableFileIndex": true,
+  "downloadConcurrency": 5
+}
+```
+
+- **勿配** `watchEnabled` / `pushDebounceMs` / `watchUsePolling`（无效）
+- 远端变更延迟 ≤ `autoSyncIntervalSec`（如 120s ≈ 2 分钟）
+
+#### `bidirectional` — 单机双向（本地改 + 收远端）
+
+```json
+{
+  "syncDirection": "bidirectional",
+  "watchEnabled": true,
+  "pushDebounceMs": 1500,
+  "watchUsePolling": false,
+  "autoSyncIntervalSec": 60,
+  "enableFileIndex": true,
+  "uploadConcurrency": 3,
+  "downloadConcurrency": 5
+}
+```
+
+- 本地 push：**watch**
+- 收远端：**定时 60s**（可按 API 限流调到 90～120）
+- 定时里的 push 与 watch 冗余，但无本地变更时增量很快 skip
+
+### 本地文件监听（即时 push）
+
+push / bidirectional mapping 在 `watchEnabled: true`（默认）时，使用 **chokidar** 监听 `localRoot` 下匹配 `filePatterns` 的变更，debounce 后触发与定时器相同的 `SyncEngine.runSync()`（含 rename/move、方案一索引 publish/consume）。
+
+| 项目 | 说明 |
+|------|------|
+| 典型延迟 | 保存后约 **1.5～5s**（`pushDebounceMs` + sync 耗时） |
+| 定时兜底 | 与 `autoSyncIntervalSec` 相同间隔；watch 漏事件时靠它修正 |
+| pull-only | 不启 watch；`autoSyncIntervalSec` 为唯一自动触发源 |
+| 方案一索引 | `.openclaw-sync-map.json` 被 watch **硬排除**；sync 期间 watcher **pause**，consume 不会误触发 push |
+| bidirectional | pull 写入本地时 watcher pause + 路径 ignore，避免 echo push |
+| 关闭 watch | 设 `watchEnabled: false`，仅依赖 `autoSyncIntervalSec` 定时 sync |
 
 ### 每条 Mapping 字段
 
@@ -189,6 +297,40 @@ npm run dev:config                   # 显式使用 ./config.json
 | `filePatterns` | 否 | 匹配文件的 glob 模式，默认同步常见文本、源码、工程配置、网页、脚本和结构化数据文件，如 `.md`、`.json`、`.txt`、`.html`、`.css`、`.js`、`.ts`、`.py`、`.go`、`.java`、`.rs`、`.yaml`、`.sql`、`Dockerfile`、`Makefile`、`.gitignore` 等 |
 | `excludePatterns` | 否 | 排除文件的 glob 模式，默认排除冲突文件、临时目录、依赖目录、构建产物、版本库目录、`.env` 与常见密钥文件 |
 | `syncDirection` | 否 | 单条 mapping 的同步方向，覆盖全局配置 |
+| `enableFileIndex` | 否 | 是否启用映射索引文件 `.openclaw-sync-map.json`，默认 `false`。见下节 |
+| `watchEnabled` | 否 | 覆盖全局；是否启用 chokidar 即时 push（pull-only 无效） |
+| `pushDebounceMs` | 否 | 覆盖全局监听 debounce（毫秒） |
+| `watchUsePolling` | 否 | 覆盖全局；NFS/Docker 卷轮询监听 |
+
+### 映射索引文件（`enableFileIndex`）
+
+Push 端 SQLite 里有 `localPath → remoteFileId`，Pull 端 / Obsidian 读不到该库。开启 `enableFileIndex` 后，同步服务在 **mapping 根目录**（本地 + KB 远端各一份）维护独立 JSON 索引，**不走** `filePatterns` / `sync_file_state` 普通对账。
+
+| 项目 | 说明 |
+|------|------|
+| 文件名 | `.openclaw-sync-map.json`（以 `.` 开头，本地 walk 默认跳过） |
+| 粒度 | **每个 mapping 根目录一份全量表**（非每子目录一份） |
+| `files` 键 | 相对 mapping 根的 `local_path`，如 `notes/2024/foo.md` |
+| `files` 值 | 知识库 `remoteFileId` 字符串 |
+
+**行为**（由 `syncDirection` 自动推导，无需额外开关）：
+
+| `syncDirection` | 同步开始前 | 同步成功后（主 sync `failed === 0`） |
+|-----------------|------------|--------------------------------------|
+| `push` | — | publish（`uploadContent`，同路径幂等） |
+| `pull` | consume（下载到 `localRoot`） | — |
+| `bidirectional` | consume | publish |
+
+**典型部署**：OpenClaw 服务器 mapping 设 `push` + `enableFileIndex: true`；用户 Pull Agent / Obsidian vault 对应 mapping 设 `pull` + `enableFileIndex: true`，且 `localRoot` 与 vault 根一致。
+
+**Obsidian 查表**（vault 根 = mapping `localRoot`）：
+
+```typescript
+const map = JSON.parse(await adapter.read('.openclaw-sync-map.json'));
+const remoteFileId = map.files[file.path]; // file.path 为 vault 相对路径
+```
+
+索引 publish 失败**不阻断**主 sync；内容 hash 未更新时下一轮自动重试（最多 3 次指数退避）。详见 [sync-logic-reference-for-obsidian.md §11](./docs/sync-logic-reference-for-obsidian.md#11-映射索引文件-enablefileindex) 与 [评估与执行计划](./docs/temp/方案一-映射文件独立同步-评估与执行计划.md)。
 
 ### `remoteRootFileId` 与 `remoteRootFolderPath` 组合
 
@@ -217,7 +359,8 @@ npm run dev:config                   # 显式使用 ./config.json
       "localRoot": "/sandboxes/alice/workspace",
       "appKey": "alice-personal-app-key",
       "remoteRootFolderPath": "AgentOutput/Alice",
-      "syncDirection": "push"
+      "syncDirection": "push",
+      "enableFileIndex": true
     }
   ]
 }
@@ -539,6 +682,8 @@ start http://127.0.0.1:9090/
 | 同步失败 / 限流 429 或 610012 | API 调用过频 | 降低 `maxRequestsPerMinute` 或增大 `autoSyncIntervalSec` |
 | 升级后首次同步明显变慢 | 新版本会记录全量对账时间；尚无记录时会触发一次全量扫描 | 属正常行为；大 mapping 可临时设 `fullReconcileIntervalSec: 0` 或在低峰升级 |
 | 本地文件未上传 | `enabled: false`、方向为 `pull`、或路径不匹配 `filePatterns` | 检查 mapping 配置与 `filePatterns` |
+| Pull 端没有 `.openclaw-sync-map.json` | Push 未开 `enableFileIndex` 或未 sync 成功；Pull 未开或方向不对 | Push 设 `push`+`enableFileIndex`；Pull 设 `pull`+`enableFileIndex`；日志搜 `[FileIndex]` |
+| 索引 publish 失败但主 sync 成功 | 网络/KB 临时错误 | 下轮自动重试；日志 `[FileIndex] publish failed after 3 attempts` |
 | 管理控制台打不开 | 端口被占用、`managementPort: 0`、或防火墙拦截 | 查启动日志端口；本机用 `127.0.0.1` 访问 |
 | 修改 `managementPort` / `managementHost` 不生效 | 这两项需**重启进程**才改变监听 | 停止后重新 `npm start` |
 | PowerShell 下 curl 异常 | 别名冲突 | 使用 `curl.exe` |

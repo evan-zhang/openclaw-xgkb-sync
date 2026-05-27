@@ -93,6 +93,31 @@
     return parts.join('，');
   }
 
+  function syncTriggerLabel(reason) {
+    switch (reason) {
+      case 'watch':
+        return '文件监听';
+      case 'timer':
+        return '定时器';
+      case 'startup':
+        return '启动';
+      case 'manual':
+        return '手动';
+      default:
+        return '—';
+    }
+  }
+
+  function watchStatusText(st, mappingSummary) {
+    const effective =
+      st?.watchEnabledEffective ??
+      mappingSummary?.watchEnabledEffective ??
+      false;
+    if (!effective) return '未启用';
+    const active = st?.watchActive ? '监听中' : '未运行';
+    return active;
+  }
+
   async function copyText(text, label) {
     try {
       if (navigator.clipboard?.writeText) {
@@ -132,6 +157,155 @@
   function syncDirectionLabel(dir) {
     const map = { bidirectional: '双向', push: '推送', pull: '拉取' };
     return map[dir] || dir || '—';
+  }
+
+  /** 各 syncDirection 推荐默认值（与 README「各模式推荐配置」一致） */
+  const SYNC_DIRECTION_PRESETS = {
+    bidirectional: {
+      autoSyncIntervalSec: 60,
+      watchEnabled: true,
+      pushDebounceMs: 1500,
+      watchUsePolling: false,
+      downloadConcurrency: 5,
+      uploadConcurrency: 3,
+      autoSyncHint:
+        '双向推荐 60 秒：定时 pull 远端 + push 兜底；本地 push 主要靠文件监听。0 = 关闭定时 sync。',
+      watchHint: '本地保存后约 debounce 内触发 sync；sync 期间会 pause 避免 pull 回写误触发。',
+      fileIndexHint:
+        '双向：同步开始前 consume 索引，成功后 publish。OpenClaw + Obsidian 联动时建议开启。',
+    },
+    push: {
+      autoSyncIntervalSec: 1800,
+      watchEnabled: true,
+      pushDebounceMs: 1500,
+      watchUsePolling: false,
+      downloadConcurrency: 5,
+      uploadConcurrency: 3,
+      autoSyncHint:
+        'push 推荐 1800 秒（30 分钟）：本地 push 靠监听，定时仅防 watch 漏事件。0 = 关闭定时 sync。',
+      watchHint: 'OpenClaw 写本地场景建议开启；Docker/NFS 卷监听不稳时可开 watchUsePolling。',
+      fileIndexHint: 'push：同步成功后 publish 索引，供 Pull 端 / Obsidian 读取 fileId。',
+    },
+    pull: {
+      autoSyncIntervalSec: 120,
+      watchEnabled: false,
+      pushDebounceMs: 1500,
+      watchUsePolling: false,
+      downloadConcurrency: 5,
+      uploadConcurrency: 3,
+      autoSyncHint:
+        'pull 推荐 120 秒：唯一自动触发源，控制从知识库拉取的频率。0 = 关闭定时 sync。',
+      watchHint: '',
+      fileIndexHint: 'pull：同步开始前 consume 索引到本地 vault 根目录。',
+    },
+  };
+
+  function needsPushDirection(dir) {
+    return dir === 'push' || dir === 'bidirectional';
+  }
+
+  function getPreset(dir) {
+    return SYNC_DIRECTION_PRESETS[dir] || SYNC_DIRECTION_PRESETS.bidirectional;
+  }
+
+  function getGlobalSyncDirection() {
+    const sel = $('#globalForm select[name="syncDirection"]');
+    return sel?.value || statusCache?.config?.syncDirection || 'bidirectional';
+  }
+
+  function getMappingEffectiveDirection(form = mappingForm) {
+    const local = $('select[name="syncDirection"]', form)?.value;
+    return local || getGlobalSyncDirection();
+  }
+
+  function applyRecommendedPlaceholder(input, recommended) {
+    if (!input || recommended == null) return;
+    const empty = input.value === '' || input.value == null;
+    if (empty) {
+      input.placeholder = `推荐 ${recommended}`;
+    }
+  }
+
+  function applyRecommendedDefaults(form, preset, fieldNames) {
+    for (const name of fieldNames) {
+      const el = form.elements.namedItem(name);
+      if (!el || el.type === 'checkbox') continue;
+      applyRecommendedPlaceholder(el, preset[name]);
+    }
+  }
+
+  function updateGlobalSyncDirectionUi() {
+    const dir = getGlobalSyncDirection();
+    const preset = getPreset(dir);
+    const push = needsPushDirection(dir);
+
+    $('#globalWatchSettings')?.classList.toggle('sync-direction-hidden', !push);
+    $('#globalDownloadConcurrencyField')?.classList.toggle('sync-direction-hidden', dir === 'push');
+    $('#globalUploadConcurrencyField')?.classList.toggle('sync-direction-hidden', dir === 'pull');
+
+    const autoHint = $('#globalAutoSyncHint');
+    if (autoHint) autoHint.textContent = preset.autoSyncHint;
+
+    const dirHint = $('#globalSyncDirectionHint');
+    if (dirHint) {
+      dirHint.textContent = `当前默认方向：${syncDirectionLabel(dir)}。mapping 可单独覆盖；无效项已隐藏。`;
+    }
+
+    const watchHint = $('#globalWatchEnabledHint');
+    if (watchHint) watchHint.textContent = preset.watchHint;
+
+    const dlHint = $('#globalDownloadConcurrencyHint');
+    if (dlHint) {
+      dlHint.textContent = dir === 'push'
+        ? 'push 方向几乎不下载，此项可忽略。'
+        : `pull/bidirectional 推荐 ${preset.downloadConcurrency}。`;
+    }
+
+    const ulHint = $('#globalUploadConcurrencyHint');
+    if (ulHint) {
+      ulHint.textContent = dir === 'pull'
+        ? 'pull 方向几乎不上传，此项可忽略。'
+        : `push/bidirectional 推荐 ${preset.uploadConcurrency}。`;
+    }
+
+    const form = $('#globalForm');
+    applyRecommendedDefaults(form, preset, [
+      'autoSyncIntervalSec',
+      'pushDebounceMs',
+      'downloadConcurrency',
+      'uploadConcurrency',
+    ]);
+    applyRecommendedPlaceholder(
+      form.elements.namedItem('autoSyncIntervalSec'),
+      preset.autoSyncIntervalSec,
+    );
+  }
+
+  function updateMappingSyncDirectionUi() {
+    const dir = getMappingEffectiveDirection();
+    const preset = getPreset(dir);
+    const push = needsPushDirection(dir);
+
+    $('#mappingWatchSettings')?.classList.toggle('sync-direction-hidden', !push);
+    $('#mappingPushOnlySettings')?.classList.toggle('sync-direction-hidden', !push);
+
+    const dirHint = $('#mappingSyncDirectionHint');
+    if (dirHint) {
+      dirHint.textContent = $('select[name="syncDirection"]', mappingForm)?.value
+        ? `当前有效方向：${syncDirectionLabel(dir)}`
+        : `继承全局：${syncDirectionLabel(getGlobalSyncDirection())}（有效方向：${syncDirectionLabel(dir)}）`;
+    }
+
+    const indexHint = $('#mappingFileIndexHint');
+    if (indexHint) indexHint.textContent = preset.fileIndexHint;
+
+    const watchHint = $('#mappingWatchEnabledHint');
+    if (watchHint && push) watchHint.textContent = preset.watchHint;
+
+    applyRecommendedPlaceholder(
+      mappingForm.elements.namedItem('pushDebounceMs'),
+      preset.pushDebounceMs,
+    );
   }
 
   function parseJsonArray(str) {
@@ -181,6 +355,9 @@
 
   $('#globalForm').elements.namedItem('maxConcurrentMappingsMode')
     ?.addEventListener('change', updateMappingConcurrencyUi);
+
+  $('#globalForm select[name="syncDirection"]')
+    ?.addEventListener('change', updateGlobalSyncDirectionUi);
 
   // ==================== Health & meta ====================
 
@@ -245,6 +422,18 @@
             <div>
               <dt>同步方向</dt>
               <dd>${syncDirectionLabel(m.syncDirection || statusCache?.config?.syncDirection)}</dd>
+            </div>
+            <div>
+              <dt>映射索引</dt>
+              <dd>${m.enableFileIndex ? '已启用' : '—'}</dd>
+            </div>
+            <div>
+              <dt>文件监听</dt>
+              <dd>${escapeHtml(watchStatusText(st, m))}</dd>
+            </div>
+            <div>
+              <dt>最近触发</dt>
+              <dd>${st?.lastTriggerReason ? escapeHtml(syncTriggerLabel(st.lastTriggerReason)) : '—'}</dd>
             </div>
             <div>
               <dt>最后同步</dt>
@@ -355,6 +544,10 @@
     if (isNew) {
       idField.value = '';
       $('input[name="enabled"]', mappingForm).checked = true;
+      $('input[name="enableFileIndex"]', mappingForm).checked = false;
+      $('input[name="watchEnabled"]', mappingForm).checked = true;
+      $('input[name="watchUsePolling"]', mappingForm).checked = false;
+      $('input[name="pushDebounceMs"]', mappingForm).value = '';
     } else {
       const m = mappingsCache.find((x) => x.mappingId === id);
       if (!m) return;
@@ -377,8 +570,16 @@
         m.filePatterns ? JSON.stringify(m.filePatterns) : '';
       $('input[name="excludePatterns"]', mappingForm).value =
         m.excludePatterns ? JSON.stringify(m.excludePatterns) : '';
+      $('input[name="enableFileIndex"]', mappingForm).checked = !!m.enableFileIndex;
+      const globalWatch = statusCache?.config?.watchEnabled !== false;
+      $('input[name="watchEnabled"]', mappingForm).checked =
+        m.watchEnabled !== undefined ? !!m.watchEnabled : globalWatch;
+      $('input[name="watchUsePolling"]', mappingForm).checked = !!m.watchUsePolling;
+      $('input[name="pushDebounceMs"]', mappingForm).value =
+        m.pushDebounceMs != null ? String(m.pushDebounceMs) : '';
     }
 
+    updateMappingSyncDirectionUi();
     modal.showModal();
   }
 
@@ -390,6 +591,8 @@
   $('#btnCloseModal').addEventListener('click', closeMappingModal);
   $('#btnCancelModal').addEventListener('click', closeMappingModal);
 
+  $('#mappingSyncDirection')?.addEventListener('change', updateMappingSyncDirectionUi);
+
   mappingForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(mappingForm);
@@ -399,7 +602,24 @@
     const body = {
       enabled: fd.get('enabled') === 'on',
       localRoot: (fd.get('localRoot') || '').toString().trim(),
+      enableFileIndex: fd.get('enableFileIndex') === 'on',
     };
+
+    const effectiveDir = (fd.get('syncDirection') || '').toString() || getGlobalSyncDirection();
+    const push = needsPushDirection(effectiveDir);
+
+    if (push) {
+      body.watchEnabled = fd.get('watchEnabled') === 'on';
+      body.watchUsePolling = fd.get('watchUsePolling') === 'on';
+      const pushDebounce = (fd.get('pushDebounceMs') || '').toString().trim();
+      if (pushDebounce) body.pushDebounceMs = Number(pushDebounce);
+
+      const moveConflict = (fd.get('moveNameConflictStrategy') || '').toString().trim();
+      if (moveConflict) body.moveNameConflictStrategy = Number(moveConflict);
+
+      const renameConflict = (fd.get('renameNameConflictStrategy') || '').toString().trim();
+      if (renameConflict) body.renameNameConflictStrategy = Number(renameConflict);
+    }
 
     const appKey = (fd.get('appKey') || '').toString().trim();
     if (appKey) body.appKey = appKey;
@@ -415,12 +635,6 @@
 
     const syncDir = (fd.get('syncDirection') || '').toString();
     if (syncDir) body.syncDirection = syncDir;
-
-    const moveConflict = (fd.get('moveNameConflictStrategy') || '').toString().trim();
-    if (moveConflict) body.moveNameConflictStrategy = Number(moveConflict);
-
-    const renameConflict = (fd.get('renameNameConflictStrategy') || '').toString().trim();
-    if (renameConflict) body.renameNameConflictStrategy = Number(renameConflict);
 
     try {
       const fp = parseJsonArray((fd.get('filePatterns') || '').toString());
@@ -481,7 +695,12 @@
     const cfg = data.config;
     for (const [key, val] of Object.entries(cfg)) {
       const input = form.elements.namedItem(key);
-      if (input && 'value' in input) input.value = val ?? '';
+      if (!input) continue;
+      if (input.type === 'checkbox') {
+        input.checked = !!val;
+      } else if ('value' in input) {
+        input.value = val ?? '';
+      }
     }
     const appKeyInput = $('input[name="appKey"]', form);
     globalAppKeyMasked = cfg.appKeyMasked || '';
@@ -489,6 +708,7 @@
     appKeyInput.dataset.maskedValue = globalAppKeyMasked;
     updateGlobalAppKeyHint();
     updateMappingConcurrencyUi();
+    updateGlobalSyncDirectionUi();
   }
 
   $('#btnSaveGlobal').addEventListener('click', async () => {
@@ -497,7 +717,7 @@
     const fields = [
       'serverUrl', 'syncDirection', 'autoSyncIntervalSec', 'maxConcurrentMappingsMode', 'maxConcurrentMappings',
       'maxRequestsPerMinute', 'stateDbPath', 'downloadConcurrency', 'uploadConcurrency',
-      'managementPort', 'managementHost',
+      'managementPort', 'managementHost', 'pushDebounceMs',
     ];
     for (const name of fields) {
       const el = form.elements.namedItem(name);
@@ -508,6 +728,8 @@
         body[name] = el.value.trim();
       }
     }
+    body.watchEnabled = form.elements.namedItem('watchEnabled')?.checked ?? true;
+    body.watchUsePolling = form.elements.namedItem('watchUsePolling')?.checked ?? false;
     const appKeyInput = form.elements.namedItem('appKey');
     const appKey = appKeyInput.value.trim();
     const maskedValue = appKeyInput.dataset.maskedValue || '';
@@ -556,7 +778,9 @@
       <div class="status-metric"><span>同步中</span><strong>${syncingCount}</strong></div>
       <div class="status-metric"><span>排队</span><strong>${pendingCount}</strong></div>
       <div class="status-metric ${errorCount ? 'metric-danger' : ''}"><span>异常</span><strong>${errorCount}</strong></div>
-      <div class="status-metric"><span>自动间隔</span><strong>${cfg.autoSyncIntervalSec ?? '—'}s</strong></div>
+      <div class="status-metric"><span>定时兜底</span><strong>${cfg.autoSyncIntervalSec ?? '—'}s</strong></div>
+      <div class="status-metric"><span>文件监听</span><strong>${cfg.watchEnabled === false ? '关' : '开'}</strong></div>
+      <div class="status-metric"><span>监听防抖</span><strong>${cfg.pushDebounceMs ?? 1500}ms</strong></div>
       <div class="status-metric"><span>映射并发</span><strong>${cfg.maxConcurrentMappingsMode || 'auto'} / ${cfg.effectiveMaxConcurrentMappings ?? '—'}</strong></div>
       <div class="status-metric"><span>API 限速</span><strong>${cfg.maxRequestsPerMinute ?? '—'}/min</strong></div>
       <div class="status-metric"><span>刷新时间</span><strong>${escapeHtml(refreshedAt)}</strong></div>
@@ -575,6 +799,9 @@
             <dt>同步结果</dt><dd>${escapeHtml(syncStatsSummary(st))}</dd>
             <dt>最后同步</dt><dd>${formatDateTime(ls.lastSuccessAt)}</dd>
             <dt>同步方向</dt><dd>${syncDirectionLabel(st.syncDirection)}</dd>
+            <dt>文件监听</dt><dd>${escapeHtml(watchStatusText(st))}</dd>
+            <dt>最近触发</dt><dd>${st.lastTriggerReason ? escapeHtml(syncTriggerLabel(st.lastTriggerReason)) : '—'}</dd>
+            <dt>最近 watch</dt><dd>${formatDateTime(st.lastWatchTriggerAt)}</dd>
             <dt>本地目录</dt><dd>${escapeHtml(st.localRoot || '—')}</dd>
             <dt>远端路径</dt><dd>${escapeHtml(st.remoteRootFolderPath || '知识库根目录')}</dd>
             <dt>空间 ID</dt><dd>${escapeHtml(ls.resolvedProjectId || '—')}</dd>

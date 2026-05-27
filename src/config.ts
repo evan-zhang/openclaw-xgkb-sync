@@ -12,7 +12,10 @@ import {
   DEFAULT_MAX_CONCURRENT_MAPPINGS,
   DEFAULT_MAX_REQUESTS_PER_MINUTE,
   DEFAULT_RATE_LIMIT_BURST,
+  DEFAULT_PUSH_DEBOUNCE_MS,
   DEFAULT_SERVER_URL,
+  DEFAULT_WATCH_ENABLED,
+  DEFAULT_WATCH_USE_POLLING,
   DOWNLOAD_CONCURRENCY,
   mergeDefaultExcludePatterns,
   RATE_LIMIT_COOLDOWN_MS,
@@ -49,6 +52,9 @@ export function getDefaultConfigRaw(): Record<string, unknown> {
     startupJitterMaxSec: STARTUP_JITTER_MAX_MS / 1000,
     managementPort: DEFAULT_MANAGEMENT_PORT,
     managementHost: DEFAULT_MANAGEMENT_HOST,
+    watchEnabled: DEFAULT_WATCH_ENABLED,
+    pushDebounceMs: DEFAULT_PUSH_DEBOUNCE_MS,
+    watchUsePolling: DEFAULT_WATCH_USE_POLLING,
     mappings: [],
   };
 }
@@ -71,6 +77,9 @@ export function configToRaw(config: SyncConfig): Record<string, unknown> {
     startupJitterMaxSec: config.startupJitterMaxSec,
     managementPort: config.managementPort,
     managementHost: config.managementHost,
+    watchEnabled: config.watchEnabled,
+    pushDebounceMs: config.pushDebounceMs,
+    watchUsePolling: config.watchUsePolling,
     mappings: config.mappings,
   };
   if (config.appKey) raw.appKey = config.appKey;
@@ -272,6 +281,16 @@ function validateConfig(raw: unknown, filePath: string): SyncConfig {
       typeof obj.managementHost === 'string' && obj.managementHost.trim()
         ? obj.managementHost.trim()
         : DEFAULT_MANAGEMENT_HOST,
+    watchEnabled:
+      typeof obj.watchEnabled === 'boolean' ? obj.watchEnabled : DEFAULT_WATCH_ENABLED,
+    pushDebounceMs:
+      typeof obj.pushDebounceMs === 'number'
+        ? Math.max(100, obj.pushDebounceMs)
+        : DEFAULT_PUSH_DEBOUNCE_MS,
+    watchUsePolling:
+      typeof obj.watchUsePolling === 'boolean'
+        ? obj.watchUsePolling
+        : DEFAULT_WATCH_USE_POLLING,
     mappings,
   };
 }
@@ -331,6 +350,20 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     loc,
   );
 
+  if (m.enableFileIndex !== undefined && typeof m.enableFileIndex !== 'boolean') {
+    throw new Error(`${loc}.enableFileIndex 必须是 boolean: ${filePath}`);
+  }
+
+  if (m.watchEnabled !== undefined && typeof m.watchEnabled !== 'boolean') {
+    throw new Error(`${loc}.watchEnabled 必须是 boolean: ${filePath}`);
+  }
+  if (m.pushDebounceMs !== undefined && typeof m.pushDebounceMs !== 'number') {
+    throw new Error(`${loc}.pushDebounceMs 必须是 number: ${filePath}`);
+  }
+  if (m.watchUsePolling !== undefined && typeof m.watchUsePolling !== 'boolean') {
+    throw new Error(`${loc}.watchUsePolling 必须是 boolean: ${filePath}`);
+  }
+
   return {
     mappingId: m.mappingId as string,
     enabled: typeof m.enabled === 'boolean' ? m.enabled : true,
@@ -344,6 +377,10 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     syncDirection: mappingSyncDirection,
     moveNameConflictStrategy,
     renameNameConflictStrategy,
+    enableFileIndex: typeof m.enableFileIndex === 'boolean' ? m.enableFileIndex : undefined,
+    watchEnabled: typeof m.watchEnabled === 'boolean' ? m.watchEnabled : undefined,
+    pushDebounceMs: typeof m.pushDebounceMs === 'number' ? m.pushDebounceMs : undefined,
+    watchUsePolling: typeof m.watchUsePolling === 'boolean' ? m.watchUsePolling : undefined,
   };
 }
 

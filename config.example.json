@@ -10,7 +10,7 @@
   "maxConcurrentMappings": 2,
 
   "_comment_ratelimit": "以下限速参数可选，括号内为默认值。多实例共用同一 appKey 时，建议将 maxRequestsPerMinute 设为 总限额/实例数",
-  "maxRequestsPerMinute": 60,
+  "maxRequestsPerMinute": 180,
   "rateLimitBurst": 8,
   "rateLimitCooldownSec": 60,
   "downloadConcurrency": 5,
@@ -19,6 +19,11 @@
 
   "managementPort": 9090,
   "managementHost": "0.0.0.0",
+
+  "_comment_watch": "push/bidirectional 下 chokidar 监听本地变更即时触发 sync；autoSyncIntervalSec 退化为兜底",
+  "watchEnabled": true,
+  "pushDebounceMs": 1500,
+  "watchUsePolling": false,
 
   "mappings": [
     {
@@ -57,14 +62,15 @@
       "remoteRootFolderPath": "AI研发/同步区"
     },
     {
-      "_comment": "多身份场景：该 mapping 使用独立 appKey，覆盖全局身份（如用于不同业务空间授权）",
+      "_comment": "Push 服务器示例：开启 enableFileIndex 向 KB 发布 .openclaw-sync-map.json",
       "mappingId": "map-biz-space",
       "enabled": false,
       "localRoot": "/data/openclaw/biz",
       "appKey": "biz-specific-app-key",
       "projectId": "88888",
       "remoteRootFolderPath": "业务A/输出",
-      "syncDirection": "push"
+      "syncDirection": "push",
+      "enableFileIndex": true
     }
   ]
 }
