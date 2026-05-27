@@ -2,7 +2,7 @@
 
 > **用途**：本文档描述 `openclaw-xgkb-sync` 当前实现的完整同步逻辑，供 Obsidian 知识库同步插件对照、借鉴与优化。  
 > **版本基准**：2026-05 当前主干实现（含 inode 对账、远端 rename/move、双向安全机制）。  
-> **代码入口**：`src/syncEngine.ts`、`src/reconcileEngine.ts`、`src/scheduler.ts`、`src/syncStateDb.ts`
+> **代码入口**：`src/syncEngine.ts`、`src/reconcileEngine.ts`、`src/fileIndexService.ts`、`src/scheduler.ts`、`src/syncStateDb.ts`
 
 ---
 
@@ -45,12 +45,14 @@ Scheduler.doSync(mapping)
   ├─ 1. RemoteFsAdapter.init()（解析 projectId / rootFileId）
   │
   └─ 2. SyncEngine.runSync()
+         ├─ [可选] FileIndex consume（enableFileIndex + pull/bidirectional）
          ├─ 本地扫描：listFiles() + listDirectories()
          ├─ 远端视图：buildRemoteMap()（增量优先，失败降级全量）
          ├─ Phase 1   本地 → 远端 rename/move（inode 对账，push/bidirectional）
          ├─ Phase 1.5 远端 → 本地 rename/move（fileId 对账，pull/bidirectional）
          ├─ Phase 2   路径对账 + decide() + 执行 upload/download/delete
-         └─ 收尾：pruneRemoteEmptyDirectories、cleanupTrash
+         ├─ 收尾：pruneRemoteEmptyDirectories、cleanupTrash
+         └─ [可选] FileIndex publish（enableFileIndex + push/bidirectional，且 failed===0）
   │
   └─ 3. 推进水位（仅 stats.failed === 0 时更新 lastSyncSince）
 ```
@@ -72,6 +74,8 @@ Obsidian 插件可用 IndexedDB / 插件 data 等等价实现，语义保持一�
 | `last_full_scan_at` | 最近一次成功全量扫描时间 |
 | `resolved_root_file_id` | 缓存的远端根 folder fileId |
 | `resolved_project_id` | 缓存的 projectId |
+| `index_file_remote_id` | 映射索引 `.openclaw-sync-map.json` 在 KB 上的 fileId（consume 加速） |
+| `index_content_hash` | 上次成功 publish 的索引 JSON SHA256（相同则 skip upload） |
 | `last_error` / `last_stats_json` | 诊断信息 |
 
 **水位推进规则**：本轮 `stats.failed === 0` 且 `newSince` 有效时才写入 `last_sync_since`；否则下轮仍用旧水位重试。
@@ -392,44 +396,98 @@ getLevel1Folders → getChildFiles（逐级）→ 不存在则 createFolder
 
 ---
 
-## 11. 典型场景速查
+## 11. 映射索引文件（`enableFileIndex`）
 
-### 11.1 本地单文件改名（同目录）
+> **实现**：`src/fileIndexService.ts`；**不参与** Phase 1/1.5/2 路径对账。
+
+### 11.1 解决的问题
+
+Push 端 SQLite 维护 `localPath → remoteFileId`，Pull 端 / Obsidian **无法访问**该 DB。索引经 KB 独立通道同步到 Pull 端本地 JSON。
+
+### 11.2 文件约定
+
+| 项 | 值 |
+|----|-----|
+| 路径 | `{localRoot}/.openclaw-sync-map.json`（KB 在 mapping **远端根**） |
+| 粒度 | **每个 mapping 根目录一份全量表**（非每子目录一份） |
+| 进 `filePatterns`？ | **否** |
+| 进 `sync_file_state`？ | **否** |
+
+### 11.3 JSON 格式
+
+```json
+{
+  "version": 1,
+  "mappingId": "notes",
+  "updatedAt": "2026-05-25T10:00:00.000Z",
+  "fileCount": 42,
+  "files": {
+    "日常笔记/2024.md": "1234567890"
+  }
+}
+```
+
+- **`files` 键**：相对 mapping / vault 根的 `local_path`
+- **`files` 值**：`remoteFileId` 字符串
+
+### 11.4 行为
+
+| `syncDirection` | sync 开始前 | sync 成功且 `failed===0` |
+|-----------------|-------------|-------------------------|
+| `push` | — | publish |
+| `pull` | consume | — |
+| `bidirectional` | consume | publish |
+
+- **publish**：`uploadContent` 幂等；hash 相同 skip；失败 3 次重试  
+- **consume**：`getDownloadInfo`；冷启动 `getChildFiles` locate；失败 2 次重试，不阻断主 sync  
+
+### 11.5 Obsidian 消费
+
+```typescript
+const doc = JSON.parse(await adapter.read('.openclaw-sync-map.json'));
+const remoteFileId = doc.files[file.path];
+```
+
+---
+
+## 12. 典型场景速查
+
+### 12.1 本地单文件改名（同目录）
 
 ```
 Phase 1: inode 匹配 → rename-remote (updateFileName)
 Phase 2: 旧路径 consumed，不参与路径对账
 ```
 
-### 11.2 本地文件移动到新目录
+### 12.2 本地文件移动到新目录
 
 ```
 Phase 1: inode 匹配 → move-remote (moveFile)
   └─ 目标目录无 folderId → 执行时 createFolder 再 move
 ```
 
-### 11.3 本地文件夹改名
+### 12.3 本地文件夹改名
 
 ```
 Phase 1: folder inode 匹配 → rename-remote 目录级 (一次 updateFileName)
   └─ 子文件 DB 路径前缀批量更新，无需逐文件 API
 ```
 
-### 11.4 远端网页端改名
+### 12.4 远端网页端改名
 
 ```
 Phase 1.5: batchGetMeta parentId/name 变化 → 本地 fs.rename
   └─ 全量模式：remoteFileId 路径对比兜底
 ```
 
-### 11.5 无法 inode 配对（跨卷复制、ino=0）
+### 12.5 无法 inode 配对（跨卷复制、ino=0）
 
 ```
 Phase 1: 跳过
 Phase 2: 旧路径 delete-* + 新路径 upload/download（退化行为）
 ```
 
-### 11.6 清空 DB 后首轮全量
+### 12.6 清空 DB 后首轮全量
 
 ```
 无 record → 同路径双端存在 → upload-update / download-update（会传内容，不单建索引）
@@ -439,9 +497,9 @@ Phase 2: 旧路径 delete-* + 新路径 upload/download（退化行为）
 
 ---
 
-## 12. Obsidian 插件适配建议
+## 13. Obsidian 插件适配建议
 
-### 12.1 可直接复用的逻辑
+### 13.1 可直接复用的逻辑
 
 1. **三表状态模型**（mapping / file / folder）+ 水位机制  
 2. **Phase 顺序**：本地 rename/move → 远端 rename/move → 路径 diff  
@@ -452,7 +510,7 @@ Phase 2: 旧路径 delete-* + 新路径 upload/download（退化行为）
 7. **全量周期性兜底** + 增量失败降级  
 8. **对账阶段不预创建远端目录**
 
-### 12.2 Obsidian 特有能力可加强的部分
+### 13.2 Obsidian 特有能力可加强的部分
 
 | OpenClaw 限制 | Obsidian 机会 |
 |---------------|---------------|
@@ -462,7 +520,7 @@ Phase 2: 旧路径 delete-* + 新路径 upload/download（退化行为）
 | 无 UI 冲突文件 | 可弹窗让用户选 local/remote/merge |
 | mtime 冲突 | 可用 `contentHash`（若 KB 支持）或三方合并 |
 
-### 12.3 Obsidian 需特别注意
+### 13.3 Obsidian 需特别注意
 
 1. **Vault 内 rename** 由 Obsidian API 触发，比纯 scan 更可靠  
 2. **移动端** inode 可能不可用 → 文件夹 rename 检测需降级策略  
@@ -470,7 +528,7 @@ Phase 2: 旧路径 delete-* + 新路径 upload/download（退化行为）
 4. **同步周期** 不建议低于 60s（Obsidian 主线程/IO 压力）  
 5. **rename-local 后** 必须刷新 vault 文件索引，等同 OpenClaw 刷新 `localMap`
 
-### 12.4 推荐插件架构对照
+### 13.4 推荐插件架构对照
 
 ```
 Obsidian Plugin
@@ -479,13 +537,14 @@ Obsidian Plugin
 ├── RemoteKbAdapter       ← remoteFs.ts + kbApi.ts
 ├── ReconcileEngine       ← reconcileEngine.ts（可复用算法）
 ├── SyncEngine            ← syncEngine.ts（Phase 1/1.5/2）
+├── FileIndexConsumer     ← fileIndexService.ts consume（或读本地 JSON）
 ├── SyncScheduler         ← scheduler.ts（或 Obsidian interval + 防重入）
-└── SettingsTab           ← mapping 配置、conflictStrategy 等
+└── SettingsTab           ← mapping 配置、conflictStrategy、enableFileIndex
 ```
 
 ---
 
-## 13. 配置项速查
+## 14. 配置项速查
 
 | 配置 | 默认 | 说明 |
 |------|------|------|
@@ -498,10 +557,11 @@ Obsidian Plugin
 | `maxRequestsPerMinute` | 60 | 每 appKey 限速 |
 | `downloadConcurrency` | 5 | |
 | `uploadConcurrency` | 3 | |
+| `enableFileIndex` | false | mapping 级；根目录 `.openclaw-sync-map.json` 独立同步 |
 
 ---
 
-## 14. 已知限制（移植时需知晓）
+## 15. 已知限制（移植时需知晓）
 
 1. `listChanges` **不支持 move 事件**；远端目录 rename 可能漏检，靠全量 `remoteFileId` 对比兜底  
 2. 增量 rename 检测要求 DB 中已有 `remoteFolderId`  
@@ -513,17 +573,18 @@ Obsidian Plugin
 
 ---
 
-## 15. 相关文档
+## 16. 相关文档
 
 | 文档 | 内容 |
 |------|------|
 | [local-change-scenarios.md](./local-change-scenarios.md) | 本地三种变更场景的 API 参数 |
 | [kb-api-requirements-for-sync.md](./kb-api-requirements-for-sync.md) | KB 需提供的接口契约 |
 | [bidirectional-sync-analysis.md](./bidirectional-sync-analysis.md) | 双向同步风险与决策 |
+| [temp/方案一-映射文件独立同步-评估与执行计划.md](./temp/方案一-映射文件独立同步-评估与执行计划.md) | 映射索引方案设计与选型 |
 | [DESIGN.md](./DESIGN.md) | 模块结构（部分决策表已过时，以本文为准） |
 
 ---
 
-## 16. 一句话总结
+## 17. 一句话总结
 
 **先按身份（inode / fileId）对齐 rename/move，再按路径 diff 处理内容增删改；增量优先、全量兜底、删除走回收站、冲突可配置——这是 openclaw-xgkb-sync 与 Obsidian 插件应共用的同步范式。**

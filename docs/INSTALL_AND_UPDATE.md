@@ -116,8 +116,18 @@ curl.exe http://127.0.0.1:9090/health
 | 远端目录路径 | 知识库内路径，如 `宋培众/0518` |
 | AppKey | 若未配置全局 AppKey，**本条 mapping 必须填写**独立 AppKey |
 | 启用 | 勾选后才会参与同步 |
+| **启用映射索引** | 可选。勾选后在 mapping 根目录同步 `.openclaw-sync-map.json`（路径→fileId 全量表）。Push 端发布、Pull 端拉取，详见 [README 映射索引一节](../README.md#映射索引文件-enablefileindex) 与 [sync-logic-reference §11](./sync-logic-reference-for-obsidian.md#11-映射索引文件-enablefileindex) |
 
 保存 mapping 后配置会写入 `config.json` 并**自动热重载**，一般无需重启进程。
+
+**典型分工**：
+
+| 节点 | `syncDirection` | `enableFileIndex` |
+|------|-----------------|-------------------|
+| OpenClaw 服务器（产出笔记） | `push` | ✅ 开启 |
+| 用户电脑 / Obsidian 侧 Pull Agent | `pull` | ✅ 开启 |
+
+Push 端同步成功后，KB mapping 根目录会出现 `.openclaw-sync-map.json`；Pull 端 sync 开始前会下载到本地 `{localRoot}/.openclaw-sync-map.json`，供 Obsidian 插件读取。
 
 ### 3. 试跑同步
 
@@ -257,6 +267,8 @@ node dist/index.js --no-log-file
 | 更新后行为异常 | 查看 `logs/` 下 `[KbApi] request#` 日志；必要时点击「重载配置」 |
 | 端口 9090 被占用 | 在「全局配置」改 `managementPort` 后**重启进程**（该字段需重启才生效） |
 | 改了 `config.json` 未生效 | 控制台「重载配置」或 `POST /reload`（`managementPort` / `managementHost` 除外，需重启） |
+| Pull 端无 `.openclaw-sync-map.json` | Push 端是否开启 `enableFileIndex` 且 sync 成功；Pull 端是否开启且方向为 `pull`/`bidirectional` |
+| 索引 publish 失败 | 日志搜 `[FileIndex]`；主 sync 成功不影响水位，下轮 hash 未更新会自动重试 |
 
 更多排错见 [README.md § 常见问题](../README.md)。
 
@@ -264,6 +276,8 @@ node dist/index.js --no-log-file
 
 ## 八、相关文档
 
-- [README.md](../README.md) — 功能说明与配置参考
+- [README.md](../README.md) — 功能说明与配置参考（含 [映射索引](#映射索引文件-enablefileindex)）
+- [sync-logic-reference-for-obsidian.md](./sync-logic-reference-for-obsidian.md) — Obsidian 插件对照；§11 映射索引消费约定
 - [MANAGEMENT_API.md](./MANAGEMENT_API.md) — HTTP API（脚本/自动化）
 - [config.example.json](../config.example.json) — 配置字段说明（模板，安装时可不复制）
+- [temp/方案一-映射文件独立同步-评估与执行计划.md](./temp/方案一-映射文件独立同步-评估与执行计划.md) — 索引方案设计与选型对比

@@ -292,6 +292,9 @@ function validateMapping(raw, idx, filePath) {
         : undefined;
     const moveNameConflictStrategy = parseMoveConflictStrategy(m.moveNameConflictStrategy, filePath, loc);
     const renameNameConflictStrategy = parseRenameConflictStrategy(m.renameNameConflictStrategy, filePath, loc);
+    if (m.enableFileIndex !== undefined && typeof m.enableFileIndex !== 'boolean') {
+        throw new Error(`${loc}.enableFileIndex 必须是 boolean: ${filePath}`);
+    }
     return {
         mappingId: m.mappingId,
         enabled: typeof m.enabled === 'boolean' ? m.enabled : true,
@@ -305,6 +308,7 @@ function validateMapping(raw, idx, filePath) {
         syncDirection: mappingSyncDirection,
         moveNameConflictStrategy,
         renameNameConflictStrategy,
+        enableFileIndex: typeof m.enableFileIndex === 'boolean' ? m.enableFileIndex : undefined,
     };
 }
 function parseMoveConflictStrategy(raw, filePath, loc) {

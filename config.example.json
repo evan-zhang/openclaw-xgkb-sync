@@ -61,7 +61,7 @@
       "filePatterns": ["**/*.md"]
     },
     {
-      "_comment": "多身份场景：该 mapping 使用独立 appKey，覆盖全局身份（如用于不同业务空间授权）",
+      "_comment": "Push 服务器示例：开启 enableFileIndex 向 KB 发布 .openclaw-sync-map.json",
       "mappingId": "map-biz-space",
       "enabled": false,
       "localRoot": "/data/openclaw/biz",
@@ -69,7 +69,8 @@
       "projectId": "88888",
       "remoteRootFolderPath": "业务A/输出",
       "syncDirection": "push",
-      "filePatterns": ["**/*.md"]
+      "filePatterns": ["**/*.md"],
+      "enableFileIndex": true
     }
   ]
 }

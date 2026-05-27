@@ -243,6 +243,10 @@
               <dd>${syncDirectionLabel(m.syncDirection || statusCache?.config?.syncDirection)}</dd>
             </div>
             <div>
+              <dt>映射索引</dt>
+              <dd>${m.enableFileIndex ? '已启用' : '—'}</dd>
+            </div>
+            <div>
               <dt>最后同步</dt>
               <dd>${formatDateTime(lastState.lastSuccessAt)}</dd>
             </div>
@@ -350,6 +354,7 @@
     if (isNew) {
       idField.value = '';
       $('input[name="enabled"]', mappingForm).checked = true;
+      $('input[name="enableFileIndex"]', mappingForm).checked = false;
     } else {
       const m = mappingsCache.find((x) => x.mappingId === id);
       if (!m) return;
@@ -372,6 +377,7 @@
         m.filePatterns ? JSON.stringify(m.filePatterns) : '';
       $('input[name="excludePatterns"]', mappingForm).value =
         m.excludePatterns ? JSON.stringify(m.excludePatterns) : '';
+      $('input[name="enableFileIndex"]', mappingForm).checked = !!m.enableFileIndex;
     }
 
     modal.showModal();
@@ -394,6 +400,7 @@
     const body = {
       enabled: fd.get('enabled') === 'on',
       localRoot: (fd.get('localRoot') || '').toString().trim(),
+      enableFileIndex: fd.get('enableFileIndex') === 'on',
     };
 
     const appKey = (fd.get('appKey') || '').toString().trim();

@@ -196,6 +196,7 @@
 | `syncDirection` | `string` \| 省略 | 覆盖全局方向 |
 | `filePatterns` | `array` | glob 列表 |
 | `excludePatterns` | `array` | glob 列表 |
+| `enableFileIndex` | `boolean` \| 省略 | 是否同步 mapping 根目录 `.openclaw-sync-map.json` 索引，默认 `false` |
 
 ---
 
@@ -227,6 +228,7 @@
 | `filePatterns` | 否 | 省略时使用下方「默认 glob 常量」 | `string[]`，glob 规则与 [README.md](../README.md) **「### 每条 Mapping 字段」** 中 `filePatterns` 说明一致 |
 | `excludePatterns` | 否 | 省略时使用下方「默认 glob 常量」 | `string[]`，同上 |
 | `syncDirection` | 否 | 继承全局 `syncDirection` | `bidirectional` \| `push` \| `pull`；含义见 [README.md](../README.md) **「### 全局字段」** 中 `syncDirection` |
+| `enableFileIndex` | 否 | `false` | 是否启用 mapping 根目录 `.openclaw-sync-map.json` 映射索引；见 [README.md](../README.md) **「### 映射索引文件（enableFileIndex）」** |
 
 #### 默认 glob 常量（与 `src/constants.ts` 一致，省略 `filePatterns` / `excludePatterns` 时生效）
 

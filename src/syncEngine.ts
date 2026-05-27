@@ -31,6 +31,7 @@ import {
 } from './constants';
 import { pathsShadowedByAncestorFiles, sanitizePathSegment } from './pathSanitize';
 import { moveToTrash, cleanupTrash } from './trashBin';
+import { FileIndexService } from './fileIndexService';
 
 type ProgressCallback = (msg: string) => void;
 
@@ -141,6 +142,8 @@ export class SyncEngine {
       console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
       this.progress(msg);
     };
+
+    await this.runFileIndexConsume(prog);
 
     prog('扫描本地文件...');
     const [localFiles, localDirs] = await Promise.all([
@@ -283,6 +286,7 @@ export class SyncEngine {
         this.stats.skipped += totalPaths;
         await this.pruneRemoteEmptyDirectories(prog, localDirs);
         prog(`增量无变化（远端0变更，本地无新增/修改/删除），跳过决策，共跳过 ${totalPaths} 个路径`);
+        await this.runFileIndexPublish(prog);
         return this.stats;
       }
       prog(`远端0变更，但本地有变化（new=${hasLocalNew} mod=${hasLocalModified} del=${hasLocalDeleted}），继续决策`);
@@ -351,7 +355,40 @@ export class SyncEngine {
         ` 重命名:${this.stats.renamed ?? 0} 移动:${this.stats.moved ?? 0}` +
         ` 空目录清理:${this.stats.prunedRemoteDirs ?? 0} fail:${this.stats.failed} skip:${this.stats.skipped}`,
     );
+    await this.runFileIndexPublish(prog);
     return this.stats;
+  }
+
+  /** enableFileIndex + pull/bidirectional：同步开始前 consume 索引 */
+  private async runFileIndexConsume(prog: ProgressCallback): Promise<void> {
+    if (!this.mapping.enableFileIndex) return;
+    const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+    if (syncDir !== 'pull' && syncDir !== 'bidirectional') return;
+    try {
+      prog('拉取映射索引文件...');
+      await new FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).consumeIndex();
+    } catch (e) {
+      this.warnFileIndex('consume', e);
+    }
+  }
+
+  /** enableFileIndex + push/bidirectional + 主 sync 无失败：同步成功后 publish 索引 */
+  private async runFileIndexPublish(prog: ProgressCallback): Promise<void> {
+    if (!this.mapping.enableFileIndex) return;
+    if (this.stats.failed > 0) return;
+    const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+    if (syncDir !== 'push' && syncDir !== 'bidirectional') return;
+    try {
+      prog('发布映射索引文件...');
+      await new FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).publishIndex();
+    } catch (e) {
+      this.warnFileIndex('publish', e);
+    }
+  }
+
+  private warnFileIndex(phase: string, e: unknown): void {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[FileIndex][${this.mapping.mappingId}] ${phase} unexpected error: ${msg}`);
   }
 
   /**

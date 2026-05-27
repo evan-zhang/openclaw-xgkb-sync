@@ -21,6 +21,7 @@ OpenClaw 节点与玄关知识库（XGKB）文件双向同步 Agent。
 | [config.example.json](./config.example.json) | 复制为 `config.json` 的配置模板 |
 | [docs/MANAGEMENT_API.md](./docs/MANAGEMENT_API.md) | 用 curl / 脚本 / AI 自动化增删改查 mapping 与全局配置 |
 | [docs/DESIGN.md](./docs/DESIGN.md) | 同步架构、增量策略、可靠性设计（非部署必读） |
+| [docs/sync-logic-reference-for-obsidian.md](./docs/sync-logic-reference-for-obsidian.md) | Obsidian 插件对照；含映射索引消费约定 |
 
 ### 部署前向用户确认的信息
 
@@ -108,6 +109,7 @@ curl.exe http://127.0.0.1:9090/health
 - **多 Mapping**：单节点可配置多条本地目录 ↔ 云端目录映射，每条独立配置方向与文件过滤
 - **按用户限速**：每个 `appKey` 独享令牌桶，多用户场景互不干扰
 - **Web 管理控制台**：浏览器访问 `/` 即可可视化增删改查 mapping 与全局配置
+- **映射索引（`enableFileIndex`）**：在 mapping 根目录独立同步 `.openclaw-sync-map.json`（`local_path → remoteFileId` 全量表），供 Pull 端 / Obsidian 按路径查 fileId，不参与普通文件对账
 - **HTTP 管理 API**：内置轻量 HTTP 服务，支持远程查看状态、触发同步、热重载配置（供 AI / 脚本调用）
 - **SQLite 状态库**：持久化同步水位与文件状态，无需外部依赖
 
@@ -189,6 +191,37 @@ npm run dev:config                   # 显式使用 ./config.json
 | `filePatterns` | 否 | 匹配文件的 glob 模式，默认 `["**/*.md"]` |
 | `excludePatterns` | 否 | 排除文件的 glob 模式，默认 `["**/_conflict_*", "**/.tmp/**"]` |
 | `syncDirection` | 否 | 单条 mapping 的同步方向，覆盖全局配置 |
+| `enableFileIndex` | 否 | 是否启用映射索引文件 `.openclaw-sync-map.json`，默认 `false`。见下节 |
+
+### 映射索引文件（`enableFileIndex`）
+
+Push 端 SQLite 里有 `localPath → remoteFileId`，Pull 端 / Obsidian 读不到该库。开启 `enableFileIndex` 后，同步服务在 **mapping 根目录**（本地 + KB 远端各一份）维护独立 JSON 索引，**不走** `filePatterns` / `sync_file_state` 普通对账。
+
+| 项目 | 说明 |
+|------|------|
+| 文件名 | `.openclaw-sync-map.json`（以 `.` 开头，本地 walk 默认跳过） |
+| 粒度 | **每个 mapping 根目录一份全量表**（非每子目录一份） |
+| `files` 键 | 相对 mapping 根的 `local_path`，如 `notes/2024/foo.md` |
+| `files` 值 | 知识库 `remoteFileId` 字符串 |
+
+**行为**（由 `syncDirection` 自动推导，无需额外开关）：
+
+| `syncDirection` | 同步开始前 | 同步成功后（主 sync `failed === 0`） |
+|-----------------|------------|--------------------------------------|
+| `push` | — | publish（`uploadContent`，同路径幂等） |
+| `pull` | consume（下载到 `localRoot`） | — |
+| `bidirectional` | consume | publish |
+
+**典型部署**：OpenClaw 服务器 mapping 设 `push` + `enableFileIndex: true`；用户 Pull Agent / Obsidian vault 对应 mapping 设 `pull` + `enableFileIndex: true`，且 `localRoot` 与 vault 根一致。
+
+**Obsidian 查表**（vault 根 = mapping `localRoot`）：
+
+```typescript
+const map = JSON.parse(await adapter.read('.openclaw-sync-map.json'));
+const remoteFileId = map.files[file.path]; // file.path 为 vault 相对路径
+```
+
+索引 publish 失败**不阻断**主 sync；内容 hash 未更新时下一轮自动重试（最多 3 次指数退避）。详见 [sync-logic-reference-for-obsidian.md §11](./docs/sync-logic-reference-for-obsidian.md#11-映射索引文件-enablefileindex) 与 [评估与执行计划](./docs/temp/方案一-映射文件独立同步-评估与执行计划.md)。
 
 ### `remoteRootFileId` 与 `remoteRootFolderPath` 组合
 
@@ -218,6 +251,7 @@ npm run dev:config                   # 显式使用 ./config.json
       "appKey": "alice-personal-app-key",
       "remoteRootFolderPath": "AgentOutput/Alice",
       "syncDirection": "push",
+      "enableFileIndex": true,
       "filePatterns": ["**/*.md"]
     }
   ]
@@ -542,6 +576,8 @@ start http://127.0.0.1:9090/
 | 同步失败 / 限流 429 或 610012 | API 调用过频 | 降低 `maxRequestsPerMinute` 或增大 `autoSyncIntervalSec` |
 | 升级后首次同步明显变慢 | 新版本会记录全量对账时间；尚无记录时会触发一次全量扫描 | 属正常行为；大 mapping 可临时设 `fullReconcileIntervalSec: 0` 或在低峰升级 |
 | 本地文件未上传 | `enabled: false`、方向为 `pull`、或路径不匹配 `filePatterns` | 检查 mapping 配置与 `filePatterns` |
+| Pull 端没有 `.openclaw-sync-map.json` | Push 未开 `enableFileIndex` 或未 sync 成功；Pull 未开或方向不对 | Push 设 `push`+`enableFileIndex`；Pull 设 `pull`+`enableFileIndex`；日志搜 `[FileIndex]` |
+| 索引 publish 失败但主 sync 成功 | 网络/KB 临时错误 | 下轮自动重试；日志 `[FileIndex] publish failed after 3 attempts` |
 | 管理控制台打不开 | 端口被占用、`managementPort: 0`、或防火墙拦截 | 查启动日志端口；本机用 `127.0.0.1` 访问 |
 | 修改 `managementPort` / `managementHost` 不生效 | 这两项需**重启进程**才改变监听 | 停止后重新 `npm start` |
 | PowerShell 下 curl 异常 | 别名冲突 | 使用 `curl.exe` |

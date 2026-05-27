@@ -749,6 +749,7 @@ class ManagementApi {
             excludePatterns: m.excludePatterns,
             moveNameConflictStrategy: m.moveNameConflictStrategy,
             renameNameConflictStrategy: m.renameNameConflictStrategy,
+            enableFileIndex: m.enableFileIndex,
         };
     }
     // ==================== 工具方法 ====================

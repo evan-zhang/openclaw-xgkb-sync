@@ -38,6 +38,11 @@ export declare class SyncEngine {
         forceFullScan?: boolean;
         forceFullScanReason?: string;
     }): Promise<SyncStats>;
+    /** enableFileIndex + pull/bidirectional：同步开始前 consume 索引 */
+    private runFileIndexConsume;
+    /** enableFileIndex + push/bidirectional + 主 sync 无失败：同步成功后 publish 索引 */
+    private runFileIndexPublish;
+    private warnFileIndex;
     /**
      * 清理远端空目录：基于 sync_folder_state 中已记录但本地已不存在的目录。
      * 从叶子到根（路径最长优先）逐个检查，避免递归 getChildFiles。

@@ -43,6 +43,7 @@ const reconcileEngine_1 = require("./reconcileEngine");
 const constants_1 = require("./constants");
 const pathSanitize_1 = require("./pathSanitize");
 const trashBin_1 = require("./trashBin");
+const fileIndexService_1 = require("./fileIndexService");
 /**
  * 核心同步引擎（OpenClaw 版）
  * 与 Obsidian 版的主要差异：
@@ -107,6 +108,7 @@ class SyncEngine {
             console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
             this.progress(msg);
         };
+        await this.runFileIndexConsume(prog);
         prog('扫描本地文件...');
         const [localFiles, localDirs] = await Promise.all([
             this.localFs.listFiles(),
@@ -208,6 +210,7 @@ class SyncEngine {
                 this.stats.skipped += totalPaths;
                 await this.pruneRemoteEmptyDirectories(prog, localDirs);
                 prog(`增量无变化（远端0变更，本地无新增/修改/删除），跳过决策，共跳过 ${totalPaths} 个路径`);
+                await this.runFileIndexPublish(prog);
                 return this.stats;
             }
             prog(`远端0变更，但本地有变化（new=${hasLocalNew} mod=${hasLocalModified} del=${hasLocalDeleted}），继续决策`);
@@ -259,7 +262,44 @@ class SyncEngine {
         prog(`完成: ↑${this.stats.uploaded} ↓${this.stats.downloaded} ✗${this.stats.deleted}` +
             ` 重命名:${this.stats.renamed ?? 0} 移动:${this.stats.moved ?? 0}` +
             ` 空目录清理:${this.stats.prunedRemoteDirs ?? 0} fail:${this.stats.failed} skip:${this.stats.skipped}`);
+        await this.runFileIndexPublish(prog);
         return this.stats;
+    }
+    /** enableFileIndex + pull/bidirectional：同步开始前 consume 索引 */
+    async runFileIndexConsume(prog) {
+        if (!this.mapping.enableFileIndex)
+            return;
+        const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+        if (syncDir !== 'pull' && syncDir !== 'bidirectional')
+            return;
+        try {
+            prog('拉取映射索引文件...');
+            await new fileIndexService_1.FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).consumeIndex();
+        }
+        catch (e) {
+            this.warnFileIndex('consume', e);
+        }
+    }
+    /** enableFileIndex + push/bidirectional + 主 sync 无失败：同步成功后 publish 索引 */
+    async runFileIndexPublish(prog) {
+        if (!this.mapping.enableFileIndex)
+            return;
+        if (this.stats.failed > 0)
+            return;
+        const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+        if (syncDir !== 'push' && syncDir !== 'bidirectional')
+            return;
+        try {
+            prog('发布映射索引文件...');
+            await new fileIndexService_1.FileIndexService(this.db, this.remoteFs, this.localFs, this.mapping).publishIndex();
+        }
+        catch (e) {
+            this.warnFileIndex('publish', e);
+        }
+    }
+    warnFileIndex(phase, e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[FileIndex][${this.mapping.mappingId}] ${phase} unexpected error: ${msg}`);
     }
     /**
      * 清理远端空目录：基于 sync_folder_state 中已记录但本地已不存在的目录。

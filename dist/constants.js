@@ -1,7 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT = exports.UPDATE_FILE_NAME_CONFLICT = exports.API_PATHS = void 0;
+exports.FILE_INDEX_CONSUME_MAX_RETRIES = exports.FILE_INDEX_PUBLISH_MAX_RETRIES = exports.FILE_INDEX_NAME = exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT = exports.UPDATE_FILE_NAME_CONFLICT = exports.API_PATHS = void 0;
 exports.cleanContent = cleanContent;
+exports.buildListDescendantFilesSuffix = buildListDescendantFilesSuffix;
 exports.extractUniqueSuffix = extractUniqueSuffix;
 exports.API_PATHS = {
     getChildFiles: 'document-database/file/getChildFiles',
@@ -130,6 +131,12 @@ exports.DEFAULT_MANAGEMENT_HOST = '0.0.0.0';
 exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
 /** 版本备注 */
 exports.VERSION_REMARK = 'OpenClaw Sync Agent';
+/** 映射索引文件名（mapping 根目录，全量 path→fileId 表） */
+exports.FILE_INDEX_NAME = '.openclaw-sync-map.json';
+/** publish 索引 uploadContent 最大重试次数（与 MAX_RETRIES 一致） */
+exports.FILE_INDEX_PUBLISH_MAX_RETRIES = exports.MAX_RETRIES;
+/** consume 索引下载最大重试次数 */
+exports.FILE_INDEX_CONSUME_MAX_RETRIES = 2;
 /**
  * 清理知识库返回的正文（去除分页页脚等）。
  * raw 为 null/undefined 时返回空字符串。
@@ -139,24 +146,56 @@ function cleanContent(raw) {
         return '';
     return raw.replace(/\n*Page \d+ of \d+\s*$/, '').trimEnd() + '\n';
 }
+/** filePatterns 末尾 `*.ext` 捕获组，用于推断 listDescendantFiles 的 suffix 参数 */
+const FILE_PATTERN_EXT_SUFFIX_RE = /\*\.([a-zA-Z0-9]+)$/;
 /**
- * 从 filePatterns 中提取唯一的文件扩展名，用于 API 级别的 suffix 过滤。
- * - 若所有 pattern 均为 `**\/*.ext` 形式且扩展名相同，返回该扩展名
- * - 否则返回 undefined（由调用方做客户端过滤）
+ * 判断 glob 是否表示「不限扩展名」（需传 suffix=*，避免不传时 KB 默认 md）。
+ */
+function isCatchAllFilePattern(pattern) {
+    if (pattern === '**/*' || pattern === '*' || pattern === '**/**')
+        return true;
+    // brace / negation 等 micromatch 复杂语法无法可靠推断扩展名
+    if (/[{[\]!]/.test(pattern))
+        return true;
+    // 如 `**/notes/*`：目录下所有文件，非单一 ext
+    if (/\/\*[^.]*$/.test(pattern) && !FILE_PATTERN_EXT_SUFFIX_RE.test(pattern))
+        return true;
+    return false;
+}
+/**
+ * 从 filePatterns 构造 listDescendantFiles 的 suffix 参数。
+ *
+ * KB 约定（待 KB 侧上线）：
+ * - 不传：默认仅 `md`（同步端应始终显式传 suffix，避免踩默认）
+ * - 单值：如 `md`
+ * - 多值：逗号分隔，如 `md,png,pdf`
+ * - `*`：不过滤类型，返回全部（客户端仍用 filePatterns 二次过滤）
  *
  * @example
- *   extractUniqueSuffix(['**\/*.md']) => 'md'
- *   extractUniqueSuffix(['**\/*.md', '**\/*.txt']) => undefined
- *   extractUniqueSuffix(['**\/*.md', '**\/subdir\/*.md']) => 'md'
+ *   buildListDescendantFilesSuffix(['**\/*.md']) => 'md'
+ *   buildListDescendantFilesSuffix(['**\/*.md', '**\/*.png']) => 'md,png'
+ *   buildListDescendantFilesSuffix(['**\/*']) => '*'
  */
-function extractUniqueSuffix(patterns) {
+function buildListDescendantFilesSuffix(patterns) {
+    if (patterns.length === 0)
+        return '*';
     const suffixes = new Set();
     for (const p of patterns) {
-        const m = p.match(/\*\.([a-zA-Z0-9]+)$/);
+        if (isCatchAllFilePattern(p))
+            return '*';
+        const m = p.match(FILE_PATTERN_EXT_SUFFIX_RE);
         if (!m)
-            return undefined; // 含有非扩展名的复杂 pattern，无法推断
+            return '*';
         suffixes.add(m[1].toLowerCase());
     }
-    return suffixes.size === 1 ? [...suffixes][0] : undefined;
+    return [...suffixes].sort().join(',');
+}
+/** @deprecated 使用 buildListDescendantFilesSuffix */
+function extractUniqueSuffix(patterns) {
+    const suffix = buildListDescendantFilesSuffix(patterns);
+    if (suffix === '*')
+        return undefined;
+    const parts = suffix.split(',');
+    return parts.length === 1 ? parts[0] : undefined;
 }
 //# sourceMappingURL=constants.js.map

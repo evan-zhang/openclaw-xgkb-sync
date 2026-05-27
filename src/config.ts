@@ -331,6 +331,10 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     loc,
   );
 
+  if (m.enableFileIndex !== undefined && typeof m.enableFileIndex !== 'boolean') {
+    throw new Error(`${loc}.enableFileIndex 必须是 boolean: ${filePath}`);
+  }
+
   return {
     mappingId: m.mappingId as string,
     enabled: typeof m.enabled === 'boolean' ? m.enabled : true,
@@ -344,6 +348,7 @@ export function validateMapping(raw: unknown, idx: number, filePath: string): Sy
     syncDirection: mappingSyncDirection,
     moveNameConflictStrategy,
     renameNameConflictStrategy,
+    enableFileIndex: typeof m.enableFileIndex === 'boolean' ? m.enableFileIndex : undefined,
   };
 }
 

@@ -125,20 +125,32 @@ export declare const DEFAULT_MANAGEMENT_HOST = "0.0.0.0";
 export declare const DEFAULT_MAX_CONCURRENT_MAPPINGS = 2;
 /** 版本备注 */
 export declare const VERSION_REMARK = "OpenClaw Sync Agent";
+/** 映射索引文件名（mapping 根目录，全量 path→fileId 表） */
+export declare const FILE_INDEX_NAME = ".openclaw-sync-map.json";
+/** publish 索引 uploadContent 最大重试次数（与 MAX_RETRIES 一致） */
+export declare const FILE_INDEX_PUBLISH_MAX_RETRIES = 3;
+/** consume 索引下载最大重试次数 */
+export declare const FILE_INDEX_CONSUME_MAX_RETRIES = 2;
 /**
  * 清理知识库返回的正文（去除分页页脚等）。
  * raw 为 null/undefined 时返回空字符串。
  */
 export declare function cleanContent(raw: string | null | undefined): string;
 /**
- * 从 filePatterns 中提取唯一的文件扩展名，用于 API 级别的 suffix 过滤。
- * - 若所有 pattern 均为 `**\/*.ext` 形式且扩展名相同，返回该扩展名
- * - 否则返回 undefined（由调用方做客户端过滤）
+ * 从 filePatterns 构造 listDescendantFiles 的 suffix 参数。
+ *
+ * KB 约定（待 KB 侧上线）：
+ * - 不传：默认仅 `md`（同步端应始终显式传 suffix，避免踩默认）
+ * - 单值：如 `md`
+ * - 多值：逗号分隔，如 `md,png,pdf`
+ * - `*`：不过滤类型，返回全部（客户端仍用 filePatterns 二次过滤）
  *
  * @example
- *   extractUniqueSuffix(['**\/*.md']) => 'md'
- *   extractUniqueSuffix(['**\/*.md', '**\/*.txt']) => undefined
- *   extractUniqueSuffix(['**\/*.md', '**\/subdir\/*.md']) => 'md'
+ *   buildListDescendantFilesSuffix(['**\/*.md']) => 'md'
+ *   buildListDescendantFilesSuffix(['**\/*.md', '**\/*.png']) => 'md,png'
+ *   buildListDescendantFilesSuffix(['**\/*']) => '*'
  */
+export declare function buildListDescendantFilesSuffix(patterns: string[]): string;
+/** @deprecated 使用 buildListDescendantFilesSuffix */
 export declare function extractUniqueSuffix(patterns: string[]): string | undefined;
 //# sourceMappingURL=constants.d.ts.map

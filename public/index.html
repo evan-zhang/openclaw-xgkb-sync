@@ -228,6 +228,11 @@
           <span>排除规则 (excludePatterns)</span>
           <input type="text" name="excludePatterns" placeholder='["**/_conflict_*"]' />
         </label>
+        <label class="checkbox-row">
+          <input type="checkbox" name="enableFileIndex" />
+          <span>启用映射索引 (enableFileIndex)</span>
+        </label>
+        <small>在 mapping 根目录同步 <code>.openclaw-sync-map.json</code>（path→fileId 全量表）。Push 端发布，Pull 端拉取。</small>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" id="btnCancelModal">取消</button>

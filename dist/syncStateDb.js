@@ -80,6 +80,8 @@ class SyncStateDb {
             'ALTER TABLE sync_file_state ADD COLUMN local_dev TEXT',
             'ALTER TABLE sync_file_state ADD COLUMN local_ino TEXT',
             'ALTER TABLE sync_file_state ADD COLUMN remote_relative_path TEXT',
+            'ALTER TABLE sync_mapping_state ADD COLUMN index_file_remote_id TEXT',
+            'ALTER TABLE sync_mapping_state ADD COLUMN index_content_hash TEXT',
         ];
         for (const sql of migrations) {
             try {
@@ -118,8 +120,9 @@ class SyncStateDb {
     upsertMappingState(state) {
         this.db.run(`INSERT INTO sync_mapping_state
          (mapping_id, last_sync_since, last_server_time, last_success_at, last_error,
-          last_full_scan_at, last_stats_json, resolved_root_file_id, resolved_project_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_full_scan_at, last_stats_json, resolved_root_file_id, resolved_project_id,
+          index_file_remote_id, index_content_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(mapping_id) DO UPDATE SET
          last_sync_since       = COALESCE(excluded.last_sync_since,       last_sync_since),
          last_server_time      = COALESCE(excluded.last_server_time,      last_server_time),
@@ -128,7 +131,9 @@ class SyncStateDb {
          last_error            = excluded.last_error,
          last_stats_json       = COALESCE(excluded.last_stats_json,       last_stats_json),
          resolved_root_file_id = COALESCE(excluded.resolved_root_file_id, resolved_root_file_id),
-         resolved_project_id   = COALESCE(excluded.resolved_project_id,   resolved_project_id)`, [
+         resolved_project_id   = COALESCE(excluded.resolved_project_id,   resolved_project_id),
+         index_file_remote_id  = COALESCE(excluded.index_file_remote_id,  index_file_remote_id),
+         index_content_hash    = COALESCE(excluded.index_content_hash,    index_content_hash)`, [
             state.mappingId,
             state.lastSyncSince ?? null,
             state.lastServerTime ?? null,
@@ -138,6 +143,8 @@ class SyncStateDb {
             state.lastStats ? JSON.stringify(state.lastStats) : null,
             state.resolvedRootFileId ?? null,
             state.resolvedProjectId ?? null,
+            state.indexFileRemoteId ?? null,
+            state.indexContentHash ?? null,
         ]);
     }
     /**
@@ -171,7 +178,9 @@ class SyncStateDb {
              last_error            = NULL,
              last_stats_json       = NULL,
              resolved_root_file_id = NULL,
-             resolved_project_id   = NULL
+             resolved_project_id   = NULL,
+             index_file_remote_id  = NULL,
+             index_content_hash    = NULL
          WHERE mapping_id = ?`, [mappingId]);
             this.db.exec('COMMIT');
         }
@@ -396,6 +405,8 @@ function rowToMappingState(row) {
         lastStats: parseStats(row.last_stats_json),
         resolvedRootFileId: row.resolved_root_file_id,
         resolvedProjectId: row.resolved_project_id,
+        indexFileRemoteId: row.index_file_remote_id,
+        indexContentHash: row.index_content_hash,
     };
 }
 function parseStats(raw) {

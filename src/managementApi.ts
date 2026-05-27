@@ -827,6 +827,7 @@ export class ManagementApi {
       excludePatterns: m.excludePatterns,
       moveNameConflictStrategy: m.moveNameConflictStrategy,
       renameNameConflictStrategy: m.renameNameConflictStrategy,
+      enableFileIndex: m.enableFileIndex,
     };
   }
 
