@@ -76,7 +76,7 @@ export declare const UPLOAD_CONCURRENCY = 3;
 /** 每批执行完成后的间隔（毫秒），为限速器补充令牌、平滑突发 */
 export declare const EXECUTE_BATCH_PAUSE_MS = 300;
 /** 默认每分钟最大 API 请求数（令牌桶稳态速率） */
-export declare const DEFAULT_MAX_REQUESTS_PER_MINUTE = 60;
+export declare const DEFAULT_MAX_REQUESTS_PER_MINUTE = 180;
 /** 默认令牌桶突发容量 */
 export declare const DEFAULT_RATE_LIMIT_BURST = 8;
 /** 收到 429 后限速器默认冷却时间（毫秒） */
@@ -131,6 +131,18 @@ export declare const FILE_INDEX_NAME = ".openclaw-sync-map.json";
 export declare const FILE_INDEX_PUBLISH_MAX_RETRIES = 3;
 /** consume 索引下载最大重试次数 */
 export declare const FILE_INDEX_CONSUME_MAX_RETRIES = 2;
+/** 本地文件监听默认开启（push/bidirectional） */
+export declare const DEFAULT_WATCH_ENABLED = true;
+/** watch 触发 sync 前的 debounce（毫秒） */
+export declare const DEFAULT_PUSH_DEBOUNCE_MS = 1500;
+/** watch 不可靠环境（NFS/Docker 卷）是否改用轮询 */
+export declare const DEFAULT_WATCH_USE_POLLING = false;
+/** awaitWriteFinish：文件大小稳定多久视为写入完成（毫秒） */
+export declare const WATCH_AWAIT_WRITE_STABILITY_MS = 300;
+/** awaitWriteFinish 轮询间隔（毫秒） */
+export declare const WATCH_AWAIT_WRITE_POLL_MS = 100;
+/** pull 写入结束后 ignoreSet 额外保留时间（毫秒），防止 resume 后 chokidar 迟到的 echo */
+export declare const WATCH_PULL_IGNORE_TAIL_MS = 200;
 /**
  * 清理知识库返回的正文（去除分页页脚等）。
  * raw 为 null/undefined 时返回空字符串。

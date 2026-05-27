@@ -381,7 +381,7 @@ getLevel1Folders → getChildFiles（逐级）→ 不存在则 createFolder
 |------|------|
 | 同一 mapping | 严格串行；同步中再触发 → `pendingSync=true`（布尔，合并为最多补 1 轮） |
 | 不同 mapping | `maxConcurrentMappings`：共用 appKey 最多 3，独立 appKey 最多 5 |
-| HTTP 请求 | 按 appKey 令牌桶：`maxRequestsPerMinute`（默认 60）、burst 8、429 冷却 60s |
+| HTTP 请求 | 按 appKey 令牌桶：`maxRequestsPerMinute`（默认 180）、burst 8、429 冷却 60s |
 | 文件传输 | upload 并发 3、download 并发 5 |
 
 ### 10.3 性能建议（Obsidian 同样适用）
@@ -554,7 +554,7 @@ Obsidian Plugin
 | `conflictStrategy` | local-wins | 双端同改：local-wins / remote-wins |
 | `moveNameConflictStrategy` | 3（跳过） | moveFile 冲突 |
 | `renameNameConflictStrategy` | 1（报错） | updateFileName 冲突 |
-| `maxRequestsPerMinute` | 60 | 每 appKey 限速 |
+| `maxRequestsPerMinute` | 180 | 每 appKey 限速 |
 | `downloadConcurrency` | 5 | |
 | `uploadConcurrency` | 3 | |
 | `enableFileIndex` | false | mapping 级；根目录 `.openclaw-sync-map.json` 独立同步 |

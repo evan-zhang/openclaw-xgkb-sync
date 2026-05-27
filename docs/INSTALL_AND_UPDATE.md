@@ -117,15 +117,16 @@ curl.exe http://127.0.0.1:9090/health
 | AppKey | 若未配置全局 AppKey，**本条 mapping 必须填写**独立 AppKey |
 | 启用 | 勾选后才会参与同步 |
 | **启用映射索引** | 可选。勾选后在 mapping 根目录同步 `.openclaw-sync-map.json`（路径→fileId 全量表）。Push 端发布、Pull 端拉取，详见 [README 映射索引一节](../README.md#映射索引文件-enablefileindex) 与 [sync-logic-reference §11](./sync-logic-reference-for-obsidian.md#11-映射索引文件-enablefileindex) |
+| **启用本地文件监听** | push/bidirectional 默认开启。本地保存 md 后约数秒内触发同步；`autoSyncIntervalSec` 仍为定时兜底。索引文件已被监听排除 |
 
-保存 mapping 后配置会写入 `config.json` 并**自动热重载**，一般无需重启进程。
+保存 mapping 后配置会写入 `config.json` 并**自动热重载**（含重启 chokidar），一般无需重启进程。
 
 **典型分工**：
 
-| 节点 | `syncDirection` | `enableFileIndex` |
-|------|-----------------|-------------------|
-| OpenClaw 服务器（产出笔记） | `push` | ✅ 开启 |
-| 用户电脑 / Obsidian 侧 Pull Agent | `pull` | ✅ 开启 |
+| 节点 | `syncDirection` | `enableFileIndex` | `watchEnabled` |
+|------|-----------------|-------------------|----------------|
+| OpenClaw 服务器（产出笔记） | `push` | ✅ 开启 | ✅ 默认开启 |
+| 用户电脑 / Obsidian 侧 Pull Agent | `pull` | ✅ 开启 | —（pull 不启 watch） |
 
 Push 端同步成功后，KB mapping 根目录会出现 `.openclaw-sync-map.json`；Pull 端 sync 开始前会下载到本地 `{localRoot}/.openclaw-sync-map.json`，供 Obsidian 插件读取。
 

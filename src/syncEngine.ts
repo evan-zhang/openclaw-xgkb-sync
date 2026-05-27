@@ -3,7 +3,7 @@ import * as nodePath from 'path';
 import { LocalFsAdapter } from './localFs';
 import { RemoteFsAdapter } from './remoteFs';
 import { SyncStateDb } from './syncStateDb';
-import { detectLocalRenames } from './reconcileEngine';
+import { detectLocalRenames, releaseContentChangedRenameTargets } from './reconcileEngine';
 import {
   FileState,
   FolderState,
@@ -29,7 +29,7 @@ import {
   MOVE_FILE_CONFLICT,
   UPLOAD_CONCURRENCY,
 } from './constants';
-import { pathsShadowedByAncestorFiles, sanitizePathSegment } from './pathSanitize';
+import { pathsShadowedByAncestorFiles, sanitizePathSegment, canonicalizeRelativeSyncPath } from './pathSanitize';
 import { moveToTrash, cleanupTrash } from './trashBin';
 import { FileIndexService } from './fileIndexService';
 
@@ -81,6 +81,8 @@ export class SyncEngine {
   private readonly excludePatterns: string[];
   private readonly downloadConcurrency: number;
   private readonly uploadConcurrency: number;
+  /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
+  private pullLocalTouchPaths = new Set<string>();
 
   constructor(
     localFs: LocalFsAdapter,
@@ -111,6 +113,21 @@ export class SyncEngine {
     return micromatch.isMatch(path, this.filePatterns);
   }
 
+  /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */
+  getPullLocalTouchPaths(): string[] {
+    return [...this.pullLocalTouchPaths];
+  }
+
+  private notePullLocalTouch(...paths: (string | undefined)[]): void {
+    const syncDir = this.mapping.syncDirection ?? 'bidirectional';
+    if (syncDir === 'push') return;
+    for (const p of paths) {
+      if (!p) continue;
+      const key = canonicalizeRelativeSyncPath(p);
+      if (key) this.pullLocalTouchPaths.add(key);
+    }
+  }
+
   private emptyStats(): SyncStats {
     return {
       uploaded: 0,
@@ -137,6 +154,7 @@ export class SyncEngine {
   ): Promise<SyncStats> {
     this.stats = this.emptyStats();
     this.progress = onProgress ?? (() => undefined);
+    this.pullLocalTouchPaths.clear();
 
     const prog = (msg: string) => {
       console.log(`[SyncEngine][${this.mapping.mappingId}] ${msg}`);
@@ -197,6 +215,17 @@ export class SyncEngine {
 
       consumedFromPaths = cfp;
       consumedToPaths = ctp;
+
+      const contentChangedAfterRename = releaseContentChangedRenameTargets(
+        localMap,
+        renamePlans,
+        consumedToPaths,
+      );
+      if (contentChangedAfterRename > 0) {
+        prog(
+          `inode 对账：${contentChangedAfterRename} 项 rename 同时有内容变更，仍参与 Phase2 上传`,
+        );
+      }
 
       if (renamePlans.length > 0) {
         const dirPlans = renamePlans.filter((p) => p.isDirectory);
@@ -1395,6 +1424,7 @@ export class SyncEngine {
   }
 
   private async doDownloadNew(path: string, remote: RemoteFileEntry): Promise<void> {
+    this.notePullLocalTouch(path);
     const body = await this.fetchContent(remote.remoteFileId);
     const actualMtime = await this.localFs.writeFile(path, body);
 
@@ -1420,6 +1450,7 @@ export class SyncEngine {
     remote: RemoteFileEntry,
     record: FileState | undefined,
   ): Promise<void> {
+    this.notePullLocalTouch(path);
     const body = await this.fetchContent(remote.remoteFileId);
     const actualMtime = await this.localFs.writeFile(path, body);
 
@@ -1486,6 +1517,7 @@ export class SyncEngine {
       }
 
       await this.localFs.rename(oldPath, newPath);
+      this.notePullLocalTouch(oldPath, newPath);
 
       this.db.deleteFileState(this.mapping.mappingId, oldPath);
       this.db.upsertFileState({
@@ -1544,6 +1576,14 @@ export class SyncEngine {
 
       await this.localFs.rename(oldPath, newPath);
 
+      for (const r of this.db.getAllFileStates(this.mapping.mappingId)) {
+        const p = r.localPath;
+        if (p === oldPath || p.startsWith(`${oldPath}/`)) {
+          this.notePullLocalTouch(p, `${newPath}${p.slice(oldPath.length)}`);
+        }
+      }
+      this.notePullLocalTouch(oldPath, newPath);
+
       // 批量更新 sync_file_state 中该目录前缀下的所有文件路径
       this.db.renameFilePaths(this.mapping.mappingId, oldPath, newPath);
       // 批量更新 sync_folder_state 中该目录前缀下的所有文件夹路径
@@ -1571,6 +1611,7 @@ export class SyncEngine {
   }
 
   private async doDeleteLocal(path: string, record: FileState): Promise<void> {
+    this.notePullLocalTouch(path);
     const absPath = this.localFs.resolve(path);
     await moveToTrash(absPath, this.mapping.mappingId, path);
     this.db.deleteFileState(this.mapping.mappingId, path);
@@ -1643,8 +1684,8 @@ export class SyncEngine {
       this.db.upsertFileState({
         ...rec,
         localPath: newPath,
-        // updateFileName 不会改变文件的 remoteFileId / remoteFolderId
-        remoteMtime: result.value.updateTime ?? rec.remoteMtime,
+        // updateFileName 不会改变文件的 remoteFileId / remoteFolderId / 内容 mtime 基线
+        remoteMtime: rec.remoteMtime,
         remoteRelativePath: newPath,
         syncStatus: 'done',
         lastSyncAt: now,
@@ -1713,8 +1754,9 @@ export class SyncEngine {
       ...record,
       localPath: toPath,
       remoteFileId: String(result.value.fileId),
-      localMtime: local?.mtime ?? record.localMtime,
-      remoteMtime: result.value.updateTime ?? record.remoteMtime,
+      // 保留 rename 前的 mtime 基线，供 Phase2 检测同轮内容变更
+      localMtime: record.localMtime,
+      remoteMtime: record.remoteMtime,
       localDev: local?.dev ?? record.localDev,
       localIno: local?.ino ?? record.localIno,
       remoteRelativePath: finalPath,
@@ -1837,8 +1879,8 @@ export class SyncEngine {
       localPath: toPath,
       remoteFileId: finalFileId,
       remoteFolderId: finalParentId,
-      localMtime: local?.mtime ?? record.localMtime,
-      remoteMtime: mv.updateTime ?? (mv.idChanged ? now + MTIME_TOLERANCE_MS : record.remoteMtime),
+      localMtime: record.localMtime,
+      remoteMtime: record.remoteMtime,
       localDev: local?.dev ?? record.localDev,
       localIno: local?.ino ?? record.localIno,
       remoteRelativePath: finalRelativePath,
@@ -1980,7 +2022,7 @@ export class SyncEngine {
         localPath: newPath,
         remoteFileId: mappedRemoteId,
         remoteFolderId: mappedFolderId,
-        remoteMtime: mv.updateTime ?? rec.remoteMtime,
+        remoteMtime: rec.remoteMtime,
         remoteRelativePath: newPath,
         syncStatus: 'done',
         lastSyncAt: now,

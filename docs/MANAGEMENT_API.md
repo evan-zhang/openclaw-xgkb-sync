@@ -112,8 +112,11 @@
 |------|------|------|
 | `serverUrl` | `string` | 知识库 API 根地址 |
 | `syncDirection` | `string` | `bidirectional` \| `push` \| `pull` |
-| `autoSyncIntervalSec` | `number` | 自动同步间隔秒 |
+| `autoSyncIntervalSec` | `number` | 定时 sync 兜底间隔（秒）；watch 启用时仍为兜底 |
 | `fullReconcileIntervalSec` | `number` \| 省略 | 强制全量对账间隔秒，默认 `3600`；`0` = 关闭 |
+| `watchEnabled` | `boolean` \| 省略 | 全局是否启用 chokidar 本地监听，默认 `true` |
+| `pushDebounceMs` | `number` \| 省略 | watch debounce 毫秒，默认 `1500` |
+| `watchUsePolling` | `boolean` \| 省略 | NFS/Docker 等环境改用轮询，默认 `false` |
 | `maxConcurrentMappingsMode` | `string` \| 省略 | `auto` \| `manual`，默认 `auto` |
 | `maxConcurrentMappings` | `number` \| 省略 | 手动模式下的最大并发 mapping 数 |
 | `effectiveMaxConcurrentMappings` | `number` | 当前实际生效的并发 mapping 数（`auto` 模式下为计算值） |
@@ -129,6 +132,10 @@
 | `localRoot` | `string` | 本地根路径 |
 | `remoteRootFolderPath` | `string` \| 省略 | 远端路径 |
 | `syncDirection` | `string` | 本条或回退到全局 |
+| `watchEnabledEffective` | `boolean` | 本条是否实际启用 watch（综合全局/本条配置与 sync 方向） |
+| `watchActive` | `boolean` | chokidar 是否已启动 |
+| `lastTriggerReason` | `string` \| `null` | 最近一次 sync 触发源：`watch` \| `timer` \| `startup` \| `manual` |
+| `lastWatchTriggerAt` | `number` \| `null` | 最近一次 watch 触发的本地时间戳（毫秒） |
 | `isSyncing` | `boolean` | 是否正在同步 |
 | `pendingSync` | `boolean` | 是否在排队等待再次同步 |
 | `lastState` | `object` \| 省略 | SQLite 中该 mapping 的状态摘要（见下表） |
@@ -197,6 +204,12 @@
 | `filePatterns` | `array` | glob 列表 |
 | `excludePatterns` | `array` | glob 列表 |
 | `enableFileIndex` | `boolean` \| 省略 | 是否同步 mapping 根目录 `.openclaw-sync-map.json` 索引，默认 `false` |
+| `watchEnabled` | `boolean` \| 省略 | 覆盖全局 watch 开关 |
+| `pushDebounceMs` | `number` \| 省略 | 覆盖全局 debounce（毫秒） |
+| `watchUsePolling` | `boolean` \| 省略 | 覆盖全局轮询模式 |
+| `watchEnabledEffective` | `boolean` | 实际是否启用 watch（只读，列表响应） |
+| `effectivePushDebounceMs` | `number` | 实际 debounce（只读） |
+| `effectiveWatchUsePolling` | `boolean` | 实际是否轮询（只读） |
 
 ---
 
@@ -229,6 +242,9 @@
 | `excludePatterns` | 否 | 省略时使用下方「默认 glob 常量」 | `string[]`，同上 |
 | `syncDirection` | 否 | 继承全局 `syncDirection` | `bidirectional` \| `push` \| `pull`；含义见 [README.md](../README.md) **「### 全局字段」** 中 `syncDirection` |
 | `enableFileIndex` | 否 | `false` | 是否启用 mapping 根目录 `.openclaw-sync-map.json` 映射索引；见 [README.md](../README.md) **「### 映射索引文件（enableFileIndex）」** |
+| `watchEnabled` | 否 | 继承全局（默认 `true`） | push/bidirectional 是否启用 chokidar 即时 push |
+| `pushDebounceMs` | 否 | 继承全局（默认 `1500`） | watch debounce 毫秒 |
+| `watchUsePolling` | 否 | 继承全局（默认 `false`） | NFS/Docker 卷轮询监听 |
 
 #### 默认 glob 常量（与 `src/constants.ts` 一致，省略 `filePatterns` / `excludePatterns` 时生效）
 
@@ -484,7 +500,7 @@
 
 ### 请求体（JSON 对象，至少一个字段）
 
-可修改字段：`serverUrl`、`appKey`（传空字符串或 `null` 清除）、`syncDirection`、`autoSyncIntervalSec`、`fullReconcileIntervalSec`、`stateDbPath`、`maxConcurrentMappingsMode`（`auto` \| `manual`）、`maxConcurrentMappings`、`maxRequestsPerMinute`、`rateLimitBurst`、`rateLimitCooldownSec`、`downloadConcurrency`、`uploadConcurrency`、`startupJitterMaxSec`、`managementPort`、`managementHost`。
+可修改字段：`serverUrl`、`appKey`（传空字符串或 `null` 清除）、`syncDirection`、`autoSyncIntervalSec`、`fullReconcileIntervalSec`、`stateDbPath`、`maxConcurrentMappingsMode`（`auto` \| `manual`）、`maxConcurrentMappings`、`maxRequestsPerMinute`、`rateLimitBurst`、`rateLimitCooldownSec`、`downloadConcurrency`、`uploadConcurrency`、`startupJitterMaxSec`、`managementPort`、`managementHost`、`watchEnabled`、`pushDebounceMs`（≥100）、`watchUsePolling`。
 
 > **注意**：`managementPort` 与 `managementHost` 写入磁盘后**需重启进程**才会改变 HTTP 监听；响应中可能带 `warnings` 提示。
 

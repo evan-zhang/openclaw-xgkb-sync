@@ -10,7 +10,7 @@
   "maxConcurrentMappings": 2,
 
   "_comment_ratelimit": "以下限速参数可选，括号内为默认值。多实例共用同一 appKey 时，建议将 maxRequestsPerMinute 设为 总限额/实例数",
-  "maxRequestsPerMinute": 60,
+  "maxRequestsPerMinute": 180,
   "rateLimitBurst": 8,
   "rateLimitCooldownSec": 60,
   "downloadConcurrency": 5,
@@ -19,6 +19,11 @@
 
   "managementPort": 9090,
   "managementHost": "0.0.0.0",
+
+  "_comment_watch": "push/bidirectional 下 chokidar 监听本地变更即时触发 sync；autoSyncIntervalSec 退化为兜底",
+  "watchEnabled": true,
+  "pushDebounceMs": 1500,
+  "watchUsePolling": false,
 
   "mappings": [
     {

@@ -57,7 +57,18 @@ export interface SyncMapping {
      * 默认 false。
      */
     enableFileIndex?: boolean;
+    /**
+     * 是否启用 chokidar 监听本地变更并触发 push（覆盖全局）。
+     * 仅 syncDirection 为 push/bidirectional 时生效；pull-only 忽略。
+     */
+    watchEnabled?: boolean;
+    /** watch debounce（毫秒），覆盖全局 pushDebounceMs */
+    pushDebounceMs?: number;
+    /** NFS/Docker 等环境改用 chokidar 轮询模式 */
+    watchUsePolling?: boolean;
 }
+/** 同步触发来源（日志与诊断） */
+export type SyncTriggerReason = 'watch' | 'timer' | 'startup' | 'manual';
 export interface SyncConfig {
     /** 知识库 Open API 根地址；省略时使用生产环境默认地址（见 constants.DEFAULT_SERVER_URL） */
     serverUrl: string;
@@ -81,7 +92,7 @@ export interface SyncConfig {
     /** 手动模式下的最大并发 mapping 数量，默认 2 */
     maxConcurrentMappings?: number;
     /**
-     * API 限速：每分钟最大请求数（令牌桶稳态速率），默认 60。
+     * API 限速：每分钟最大请求数（令牌桶稳态速率），默认 180。
      * 多台服务器共享同一知识库时，建议各自降低此值（如 30）以避免聚合超限。
      */
     maxRequestsPerMinute?: number;
@@ -117,6 +128,15 @@ export interface SyncConfig {
      * 注意做好网络隔离，勿在公网暴露。
      */
     managementHost?: string;
+    /**
+     * 是否启用 chokidar 监听本地变更并触发 push，默认 true。
+     * push 场景下 autoSyncIntervalSec 退化为兜底；pull-only mapping 不启 watch。
+     */
+    watchEnabled?: boolean;
+    /** watch debounce（毫秒），默认 1500 */
+    pushDebounceMs?: number;
+    /** watch 不可靠环境改用轮询，默认 false */
+    watchUsePolling?: boolean;
     mappings: SyncMapping[];
 }
 export type ApiOk<T> = {

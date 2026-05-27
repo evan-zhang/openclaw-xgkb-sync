@@ -11,8 +11,9 @@
     "dev:config": "ts-node src/index.ts --config config.json"
   },
   "dependencies": {
-    "node-sqlite3-wasm": "^0.8.57",
-    "micromatch": "^4.0.8"
+    "chokidar": "^4.0.3",
+    "micromatch": "^4.0.8",
+    "node-sqlite3-wasm": "^0.8.57"
   },
   "devDependencies": {
     "@types/micromatch": "^4.0.9",

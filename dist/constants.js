@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.FILE_INDEX_CONSUME_MAX_RETRIES = exports.FILE_INDEX_PUBLISH_MAX_RETRIES = exports.FILE_INDEX_NAME = exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT = exports.UPDATE_FILE_NAME_CONFLICT = exports.API_PATHS = void 0;
+exports.WATCH_PULL_IGNORE_TAIL_MS = exports.WATCH_AWAIT_WRITE_POLL_MS = exports.WATCH_AWAIT_WRITE_STABILITY_MS = exports.DEFAULT_WATCH_USE_POLLING = exports.DEFAULT_PUSH_DEBOUNCE_MS = exports.DEFAULT_WATCH_ENABLED = exports.FILE_INDEX_CONSUME_MAX_RETRIES = exports.FILE_INDEX_PUBLISH_MAX_RETRIES = exports.FILE_INDEX_NAME = exports.VERSION_REMARK = exports.DEFAULT_MAX_CONCURRENT_MAPPINGS = exports.DEFAULT_MANAGEMENT_HOST = exports.DEFAULT_MANAGEMENT_PORT = exports.DEFAULT_FULL_RECONCILE_INTERVAL_SEC = exports.DEFAULT_AUTO_SYNC_INTERVAL_SEC = exports.DEFAULT_SERVER_URL = exports.DEFAULT_DB_PATH = exports.DEFAULT_EXCLUDE_PATTERNS = exports.DEFAULT_FILE_PATTERNS = exports.MTIME_TOLERANCE_MS = exports.API_ERROR_MESSAGE_BODY_MAX = exports.API_ERROR_LOG_MAX_CHARS = exports.REQUEST_TIMEOUT_MS = exports.RETRY_BASE_DELAY_MS = exports.MAX_RETRIES = exports.CHANGES_SAFETY_WINDOW_MS = exports.STARTUP_JITTER_MAX_MS = exports.TRANSIENT_RESULT_CODES = exports.RATE_LIMIT_RESULT_CODES = exports.RATE_LIMIT_COOLDOWN_MS = exports.DEFAULT_RATE_LIMIT_BURST = exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = exports.EXECUTE_BATCH_PAUSE_MS = exports.UPLOAD_CONCURRENCY = exports.DOWNLOAD_CONCURRENCY = exports.BATCH_GET_META_MAX = exports.BATCH_GET_CONTENT_MAX = exports.DEFAULT_RENAME_NAME_CONFLICT_STRATEGY = exports.DEFAULT_MOVE_NAME_CONFLICT_STRATEGY = exports.MOVE_FILE_CONFLICT = exports.UPDATE_FILE_NAME_CONFLICT = exports.API_PATHS = void 0;
 exports.cleanContent = cleanContent;
 exports.buildListDescendantFilesSuffix = buildListDescendantFilesSuffix;
 exports.extractUniqueSuffix = extractUniqueSuffix;
@@ -82,7 +82,7 @@ exports.UPLOAD_CONCURRENCY = 3;
 /** 每批执行完成后的间隔（毫秒），为限速器补充令牌、平滑突发 */
 exports.EXECUTE_BATCH_PAUSE_MS = 300;
 /** 默认每分钟最大 API 请求数（令牌桶稳态速率） */
-exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = 60;
+exports.DEFAULT_MAX_REQUESTS_PER_MINUTE = 180;
 /** 默认令牌桶突发容量 */
 exports.DEFAULT_RATE_LIMIT_BURST = 8;
 /** 收到 429 后限速器默认冷却时间（毫秒） */
@@ -137,6 +137,18 @@ exports.FILE_INDEX_NAME = '.openclaw-sync-map.json';
 exports.FILE_INDEX_PUBLISH_MAX_RETRIES = exports.MAX_RETRIES;
 /** consume 索引下载最大重试次数 */
 exports.FILE_INDEX_CONSUME_MAX_RETRIES = 2;
+/** 本地文件监听默认开启（push/bidirectional） */
+exports.DEFAULT_WATCH_ENABLED = true;
+/** watch 触发 sync 前的 debounce（毫秒） */
+exports.DEFAULT_PUSH_DEBOUNCE_MS = 1500;
+/** watch 不可靠环境（NFS/Docker 卷）是否改用轮询 */
+exports.DEFAULT_WATCH_USE_POLLING = false;
+/** awaitWriteFinish：文件大小稳定多久视为写入完成（毫秒） */
+exports.WATCH_AWAIT_WRITE_STABILITY_MS = 300;
+/** awaitWriteFinish 轮询间隔（毫秒） */
+exports.WATCH_AWAIT_WRITE_POLL_MS = 100;
+/** pull 写入结束后 ignoreSet 额外保留时间（毫秒），防止 resume 后 chokidar 迟到的 echo */
+exports.WATCH_PULL_IGNORE_TAIL_MS = 200;
 /**
  * 清理知识库返回的正文（去除分页页脚等）。
  * raw 为 null/undefined 时返回空字符串。

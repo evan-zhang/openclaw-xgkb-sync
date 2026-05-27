@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpenClaw 同步管理</title>
-  <link rel="stylesheet" href="/static/styles.css?v=settings-groups-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=sync-direction-ui-1" />
 </head>
 <body>
   <div class="app">
@@ -79,13 +79,30 @@
                 <option value="push">仅推送 (push)</option>
                 <option value="pull">仅拉取 (pull)</option>
               </select>
-              <small>建议：全局用双向；本地生成目录可在单条映射中改为仅推送。</small>
+              <small id="globalSyncDirectionHint">未单独配置的 mapping 继承此方向；切换后下方项会显示/隐藏。</small>
             </label>
             <label>
               <span>自动同步间隔（秒）</span>
-              <input type="number" name="autoSyncIntervalSec" min="0" step="1" value="180" />
-              <small>建议：180。0 表示关闭自动同步；需要接近实时可设为 60。</small>
+              <input type="number" name="autoSyncIntervalSec" min="0" step="1" placeholder="180" />
+              <small id="globalAutoSyncHint">定时触发完整 sync 的间隔；具体角色见下方说明（随同步方向变化）。</small>
             </label>
+            <div id="globalWatchSettings" class="sync-direction-group">
+              <label class="checkbox-row">
+                <input type="checkbox" name="watchEnabled" checked />
+                <span>启用本地文件监听 (watchEnabled)</span>
+              </label>
+              <small id="globalWatchEnabledHint">push/bidirectional：本地保存后约 debounce 内触发 sync。</small>
+              <label>
+                <span>监听防抖 (pushDebounceMs，毫秒)</span>
+                <input type="number" name="pushDebounceMs" min="100" step="100" placeholder="1500" />
+                <small>编辑器连续保存合并为一次同步；留空使用默认 1500。</small>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" name="watchUsePolling" />
+                <span>NFS/Docker 卷使用轮询监听 (watchUsePolling)</span>
+              </label>
+              <small>inotify 不可靠时开启；与「定时 sync」无关，仅改变监听方式。</small>
+            </div>
           </div>
         </div>
         <div class="settings-panel" id="settings-advanced">
@@ -110,23 +127,23 @@
             </label>
             <label>
               <span>API 限速（次/分钟）</span>
-              <input type="number" name="maxRequestsPerMinute" min="1" step="1" />
-              <small>建议：60。若日志出现 429 或 610012，再降到 30-40。</small>
+              <input type="number" name="maxRequestsPerMinute" min="1" step="1" placeholder="180" />
+              <small>默认 180。若日志出现 429 或 610012，再降到 60～120。</small>
             </label>
             <label>
               <span>状态库路径</span>
               <input type="text" name="stateDbPath" />
               <small>建议：./openclaw-sync-state.db。保持默认便于备份和迁移。</small>
             </label>
-            <label>
+            <label id="globalDownloadConcurrencyField">
               <span>下载并发数</span>
-              <input type="number" name="downloadConcurrency" min="1" step="1" />
-              <small>建议：5。下载通常可以略高于上传。</small>
+              <input type="number" name="downloadConcurrency" min="1" step="1" placeholder="5" />
+              <small id="globalDownloadConcurrencyHint">pull/bidirectional 推荐 5。</small>
             </label>
-            <label>
+            <label id="globalUploadConcurrencyField">
               <span>上传并发数</span>
-              <input type="number" name="uploadConcurrency" min="1" step="1" />
-              <small>建议：3。批量改文件时更稳，减少 API 突发压力。</small>
+              <input type="number" name="uploadConcurrency" min="1" step="1" placeholder="3" />
+              <small id="globalUploadConcurrencyHint">push/bidirectional 推荐 3。</small>
             </label>
             <label>
               <span>管理 API 端口</span>
@@ -192,33 +209,36 @@
         </label>
         <label>
           <span>同步方向</span>
-          <select name="syncDirection">
+          <select name="syncDirection" id="mappingSyncDirection">
             <option value="">继承全局</option>
             <option value="bidirectional">双向</option>
             <option value="push">仅推送</option>
             <option value="pull">仅拉取</option>
           </select>
+          <small id="mappingSyncDirectionHint">留空则使用全局默认方向。</small>
         </label>
-        <label>
-          <span>移动冲突策略 (moveNameConflictStrategy)</span>
-          <select name="moveNameConflictStrategy">
-            <option value="">默认（3=跳过）</option>
-            <option value="0">0 = 重命名</option>
-            <option value="1">1 = 覆盖</option>
-            <option value="2">2 = 抛异常</option>
-            <option value="3">3 = 跳过</option>
-          </select>
-          <small>用于 moveFile 同名冲突；建议默认或 3（跳过）更安全。</small>
-        </label>
-        <label>
-          <span>重命名冲突策略 (renameNameConflictStrategy)</span>
-          <select name="renameNameConflictStrategy">
-            <option value="">默认（1=抛异常）</option>
-            <option value="0">0 = 自动重命名</option>
-            <option value="1">1 = 抛异常</option>
-          </select>
-          <small>用于 updateFileName 同名冲突；默认 1（抛异常）。</small>
-        </label>
+        <div id="mappingPushOnlySettings" class="sync-direction-group">
+          <label>
+            <span>移动冲突策略 (moveNameConflictStrategy)</span>
+            <select name="moveNameConflictStrategy">
+              <option value="">默认（3=跳过）</option>
+              <option value="0">0 = 重命名</option>
+              <option value="1">1 = 覆盖</option>
+              <option value="2">2 = 抛异常</option>
+              <option value="3">3 = 跳过</option>
+            </select>
+            <small>push/bidirectional 下 moveFile 同名冲突；pull 无效。</small>
+          </label>
+          <label>
+            <span>重命名冲突策略 (renameNameConflictStrategy)</span>
+            <select name="renameNameConflictStrategy">
+              <option value="">默认（1=抛异常）</option>
+              <option value="0">0 = 自动重命名</option>
+              <option value="1">1 = 抛异常</option>
+            </select>
+            <small>push/bidirectional 下 updateFileName 同名冲突。</small>
+          </label>
+        </div>
         <label>
           <span>文件匹配 (filePatterns)</span>
           <input type="text" name="filePatterns" placeholder='["**/*.md"]' />
@@ -232,7 +252,23 @@
           <input type="checkbox" name="enableFileIndex" />
           <span>启用映射索引 (enableFileIndex)</span>
         </label>
-        <small>在 mapping 根目录同步 <code>.openclaw-sync-map.json</code>（path→fileId 全量表）。Push 端发布，Pull 端拉取。</small>
+        <small id="mappingFileIndexHint">在 mapping 根目录同步 <code>.openclaw-sync-map.json</code>；行为随同步方向自动 consume/publish。</small>
+        <div id="mappingWatchSettings" class="sync-direction-group">
+          <label class="checkbox-row">
+            <input type="checkbox" name="watchEnabled" checked />
+            <span>启用本地文件监听 (watchEnabled)</span>
+          </label>
+          <small id="mappingWatchEnabledHint">覆盖全局；pull 方向无效。</small>
+          <label>
+            <span>监听防抖 (pushDebounceMs，毫秒，可选)</span>
+            <input type="number" name="pushDebounceMs" min="100" step="100" placeholder="1500" />
+            <small>留空继承全局默认 1500。</small>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="watchUsePolling" />
+            <span>NFS/Docker 卷轮询监听 (watchUsePolling)</span>
+          </label>
+        </div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" id="btnCancelModal">取消</button>
@@ -241,6 +277,6 @@
     </form>
   </dialog>
 
-  <script src="/static/app.js?v=settings-groups-1"></script>
+  <script src="/static/app.js?v=sync-direction-ui-1"></script>
 </body>
 </html>

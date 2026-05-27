@@ -91,7 +91,7 @@ export const UPLOAD_CONCURRENCY = 3;
 export const EXECUTE_BATCH_PAUSE_MS = 300;
 
 /** 默认每分钟最大 API 请求数（令牌桶稳态速率） */
-export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 60;
+export const DEFAULT_MAX_REQUESTS_PER_MINUTE = 180;
 
 /** 默认令牌桶突发容量 */
 export const DEFAULT_RATE_LIMIT_BURST = 8;
@@ -171,6 +171,24 @@ export const FILE_INDEX_PUBLISH_MAX_RETRIES = MAX_RETRIES;
 
 /** consume 索引下载最大重试次数 */
 export const FILE_INDEX_CONSUME_MAX_RETRIES = 2;
+
+/** 本地文件监听默认开启（push/bidirectional） */
+export const DEFAULT_WATCH_ENABLED = true;
+
+/** watch 触发 sync 前的 debounce（毫秒） */
+export const DEFAULT_PUSH_DEBOUNCE_MS = 1500;
+
+/** watch 不可靠环境（NFS/Docker 卷）是否改用轮询 */
+export const DEFAULT_WATCH_USE_POLLING = false;
+
+/** awaitWriteFinish：文件大小稳定多久视为写入完成（毫秒） */
+export const WATCH_AWAIT_WRITE_STABILITY_MS = 300;
+
+/** awaitWriteFinish 轮询间隔（毫秒） */
+export const WATCH_AWAIT_WRITE_POLL_MS = 100;
+
+/** pull 写入结束后 ignoreSet 额外保留时间（毫秒），防止 resume 后 chokidar 迟到的 echo */
+export const WATCH_PULL_IGNORE_TAIL_MS = 200;
 
 /**
  * 清理知识库返回的正文（去除分页页脚等）。

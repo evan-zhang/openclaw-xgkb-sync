@@ -21,6 +21,8 @@ export declare class SyncEngine {
     private readonly excludePatterns;
     private readonly downloadConcurrency;
     private readonly uploadConcurrency;
+    /** pull/bidirectional 本轮 sync 写入本地的路径，供 FileWatcher resume 后 echo 过滤 */
+    private pullLocalTouchPaths;
     constructor(localFs: LocalFsAdapter, remoteFs: RemoteFsAdapter, db: SyncStateDb, mapping: SyncMapping, opts?: {
         downloadConcurrency?: number;
         uploadConcurrency?: number;
@@ -28,6 +30,9 @@ export declare class SyncEngine {
     private delay;
     /** 判断路径是否应纳入同步范围 */
     private matchesSync;
+    /** 本轮 sync 中 pull 侧写入本地的路径（供 chokidar echo 过滤） */
+    getPullLocalTouchPaths(): string[];
+    private notePullLocalTouch;
     private emptyStats;
     /**
      * 执行一轮同步（增量优先，降级全量）。

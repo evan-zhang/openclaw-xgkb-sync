@@ -1,3 +1,4 @@
+import { MTIME_TOLERANCE_MS } from './constants';
 import { FileState, FolderState, LocalDirEntry, LocalFileEntry, SyncPlan } from './types';
 
 export interface DetectRenamesResult {
@@ -11,6 +12,38 @@ export interface DetectRenamesResult {
  * 1. 先通过文件夹自身 inode 检测目录级 rename/move
  * 2. 再检测剩余单文件 rename/move（未被目录计划消费的文件）
  */
+/**
+ * rename/move 成功后路径会进入 consumedToPaths 以跳过 Phase2 路径对账。
+ * 若同轮还改了文件内容，需从 consumedToPaths 移除，以便 Phase2 执行 upload-update。
+ */
+export function releaseContentChangedRenameTargets(
+  localMap: Map<string, LocalFileEntry>,
+  renamePlans: SyncPlan[],
+  consumedToPaths: Set<string>,
+): number {
+  let released = 0;
+  for (const plan of renamePlans) {
+    if (plan.isDirectory && plan.affectedRecords?.length) {
+      const oldDir = plan.directoryOldPath ?? '';
+      const newDir = plan.directoryNewPath ?? '';
+      for (const rec of plan.affectedRecords) {
+        const suffix = pathSuffixUnderDir(rec.localPath, oldDir);
+        const newPath = newDir ? `${newDir}/${suffix}` : suffix;
+        const local = localMap.get(newPath);
+        if (local && local.mtime > (rec.localMtime ?? 0) + MTIME_TOLERANCE_MS) {
+          if (consumedToPaths.delete(newPath)) released++;
+        }
+      }
+    } else if (plan.path && plan.record) {
+      const local = plan.local ?? localMap.get(plan.path);
+      if (local && local.mtime > (plan.record.localMtime ?? 0) + MTIME_TOLERANCE_MS) {
+        if (consumedToPaths.delete(plan.path)) released++;
+      }
+    }
+  }
+  return released;
+}
+
 export function detectLocalRenames(
   localFiles: LocalFileEntry[],
   localDirs: LocalDirEntry[],

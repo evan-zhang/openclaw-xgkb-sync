@@ -66,6 +66,9 @@ function getDefaultConfigRaw() {
         startupJitterMaxSec: constants_1.STARTUP_JITTER_MAX_MS / 1000,
         managementPort: constants_1.DEFAULT_MANAGEMENT_PORT,
         managementHost: constants_1.DEFAULT_MANAGEMENT_HOST,
+        watchEnabled: constants_1.DEFAULT_WATCH_ENABLED,
+        pushDebounceMs: constants_1.DEFAULT_PUSH_DEBOUNCE_MS,
+        watchUsePolling: constants_1.DEFAULT_WATCH_USE_POLLING,
         mappings: [],
     };
 }
@@ -87,6 +90,9 @@ function configToRaw(config) {
         startupJitterMaxSec: config.startupJitterMaxSec,
         managementPort: config.managementPort,
         managementHost: config.managementHost,
+        watchEnabled: config.watchEnabled,
+        pushDebounceMs: config.pushDebounceMs,
+        watchUsePolling: config.watchUsePolling,
         mappings: config.mappings,
     };
     if (config.appKey)
@@ -256,6 +262,13 @@ function validateConfig(raw, filePath) {
         managementHost: typeof obj.managementHost === 'string' && obj.managementHost.trim()
             ? obj.managementHost.trim()
             : constants_1.DEFAULT_MANAGEMENT_HOST,
+        watchEnabled: typeof obj.watchEnabled === 'boolean' ? obj.watchEnabled : constants_1.DEFAULT_WATCH_ENABLED,
+        pushDebounceMs: typeof obj.pushDebounceMs === 'number'
+            ? Math.max(100, obj.pushDebounceMs)
+            : constants_1.DEFAULT_PUSH_DEBOUNCE_MS,
+        watchUsePolling: typeof obj.watchUsePolling === 'boolean'
+            ? obj.watchUsePolling
+            : constants_1.DEFAULT_WATCH_USE_POLLING,
         mappings,
     };
 }
@@ -295,6 +308,15 @@ function validateMapping(raw, idx, filePath) {
     if (m.enableFileIndex !== undefined && typeof m.enableFileIndex !== 'boolean') {
         throw new Error(`${loc}.enableFileIndex 必须是 boolean: ${filePath}`);
     }
+    if (m.watchEnabled !== undefined && typeof m.watchEnabled !== 'boolean') {
+        throw new Error(`${loc}.watchEnabled 必须是 boolean: ${filePath}`);
+    }
+    if (m.pushDebounceMs !== undefined && typeof m.pushDebounceMs !== 'number') {
+        throw new Error(`${loc}.pushDebounceMs 必须是 number: ${filePath}`);
+    }
+    if (m.watchUsePolling !== undefined && typeof m.watchUsePolling !== 'boolean') {
+        throw new Error(`${loc}.watchUsePolling 必须是 boolean: ${filePath}`);
+    }
     return {
         mappingId: m.mappingId,
         enabled: typeof m.enabled === 'boolean' ? m.enabled : true,
@@ -309,6 +331,9 @@ function validateMapping(raw, idx, filePath) {
         moveNameConflictStrategy,
         renameNameConflictStrategy,
         enableFileIndex: typeof m.enableFileIndex === 'boolean' ? m.enableFileIndex : undefined,
+        watchEnabled: typeof m.watchEnabled === 'boolean' ? m.watchEnabled : undefined,
+        pushDebounceMs: typeof m.pushDebounceMs === 'number' ? m.pushDebounceMs : undefined,
+        watchUsePolling: typeof m.watchUsePolling === 'boolean' ? m.watchUsePolling : undefined,
     };
 }
 function parseMoveConflictStrategy(raw, filePath, loc) {

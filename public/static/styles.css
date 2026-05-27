@@ -177,6 +177,7 @@ body {
   display: block;
 }
 
+.sync-direction-hidden,
 .advanced-only-hidden {
   display: none !important;
 }
